@@ -1,0 +1,80 @@
+board=[
+    ["r","n","b","q","k","b","n","r"],
+    ["p","p","p","p","p","p","p","p"],
+    [".",".",".",".",".",".",".","."],
+    [".",".",".",".",".",".",".","."],
+    [".",".",".",".",".",".",".","."],
+    [".",".",".",".",".",".",".","."],
+    ["P","P","P","P","P","P","P","P"],
+    ["R","N","B","Q","K","B","N","R"],
+]
+# for row in board:
+#     print(row)
+
+# for row in board:
+#     print("This row is",row)
+
+# for i in range(8):
+#     print("Row Number:",i,"is",board[i])
+
+def is_valid_white_pawn_move(board,from_row,from_col,to_row,to_col):
+    if from_col !=to_col:
+        return False
+    if to_row==from_row-1 and board[to_row][to_col]==".":
+        return True
+    if from_row==6 and to_row==from_row-2:
+        if board[from_row-1][from_col]=="." and board[to_row][from_col]==".":
+            return True
+    return False
+
+def notation_to_index(square):
+    file=square[0]
+    rank=int(square[1])
+
+    col=ord(file)-ord('a')
+    row=8-rank
+
+    return row,col
+
+def move_piece(board,from_row,from_col,to_row,to_col):
+    piece=board[from_row][from_col]
+    board[to_row][to_col]=piece
+    board[from_row][from_col]="."
+
+
+def move_piece_notation(board,from_square,to_square):
+    from_row,from_col=notation_to_index(from_square)
+    to_row,to_col=notation_to_index(to_square)
+
+    piece=board[from_row][from_col]
+
+    if piece=="P":
+        if is_valid_white_pawn_move(board,from_row,from_col,to_row,to_col):
+            move_piece(board,from_row,from_col,to_row,to_col)
+        else:
+            print("Invalis pawn move")
+    else:
+        print("Only white pawn validation implemented")
+
+
+move_piece(board,7,6,5,5)
+for  row in board:
+    print(" ".join(row))
+
+move_piece_notation(board,"e2","e4")
+for  row in board:
+    print(" ".join(row))
+
+
+move_piece_notation(board,"e4","e5")
+for  row in board:
+    print(" ".join(row))
+
+
+move_piece_notation(board,"e5","e7")
+for  row in board:
+    print(" ".join(row))
+
+
+
+
