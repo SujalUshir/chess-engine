@@ -8,16 +8,15 @@ board=[
     ["P","P","P","P","P","P","P","P"],
     ["R","N","B","Q","K","B","N","R"],
 ]
-# for row in board:
-#     print(row)
-
-# for row in board:
-#     print("This row is",row)
-
-# for i in range(8):
-#     print("Row Number:",i,"is",board[i])
 
 current_turn="white"
+
+def print_board(board):
+    print()
+    for i in range(8):
+        print(8-i," ".join(board[i]))
+    print(" a b c d e f g h")
+    print()
 
 
 
@@ -51,6 +50,127 @@ def is_valid_pawn_move(board,from_row,from_col,to_row,to_col,piece):
 
     return False
 
+def is_valid_rook_move(board,from_row,from_col,to_row,to_col,piece):
+
+    if not(0<=to_row<8 and 0<=to_col<8):
+        return False
+    if from_row!=to_row and from_col!=to_col:
+        return False
+    
+    row_step=0
+    col_step=0
+
+    if to_row>from_row:
+        row_step=1
+    elif to_row<from_row:
+        row_step=-1
+
+    if to_col>from_col:
+        col_step=1
+    elif to_col<from_col:
+        col_step=-1
+
+    current_row=from_row+row_step
+    current_col=from_col+col_step
+
+    while(current_row!=to_row or current_col!=to_col):
+        if board[current_row][current_col]!=".":
+            return False
+        current_row+=row_step
+        current_col+=col_step
+
+    target=board[to_row][to_col]
+
+    if target==".":
+        return True
+    if piece.isupper() and target.islower():
+        return True
+    if piece.islower() and target.isupper():
+        return True
+    
+    return False
+
+def is_valid_bishop_move(board,from_row,from_col,to_row,to_col,piece):
+    if not(0<=to_row<8 and 0<=to_col<8):
+        return False
+    
+    if abs(to_row-from_row)!=abs(to_col-from_col):
+        return False
+    
+    row_step=1 if to_row>from_row else -1
+    col_step=1 if to_col>from_col else -1
+
+    current_row=from_row+row_step
+    current_col=from_col+col_step
+
+    while current_row!=to_row and current_col!=to_col:
+        if board[current_row][current_col]!=".":
+            return False
+        current_row+=row_step
+        current_col+=col_step
+
+    target=board[to_row][to_col]
+
+    if target==".":
+        return True
+    
+    if piece.isupper() and target.islower():
+        return True
+    if piece.islower() and target.isupper():
+        return True
+    return False
+
+def is_valid_knight_move(board,from_row,from_col,to_row,to_col,piece):
+    if not (0<=to_row<8 and 0<=to_col<8):
+        return False
+    
+    row_diff=abs(to_row-from_row)
+    col_diff=abs(to_col-from_col)
+
+    if not ((row_diff==2 and col_diff==1)or(row_diff==1 and col_diff==2)):
+        return False
+    
+    target=board[to_row][to_col]
+
+    if target==".":
+        return True
+    
+    if piece.isupper() and target.islower():
+        return True
+    if piece.islower() and target.isupper():
+        return True
+    return False
+    
+def is_valid_queen_move(board,from_row,from_col,to_row,to_col,piece):
+    if is_valid_rook_move(board,from_row,from_col,to_row,to_col,piece):
+        return True
+    if is_valid_bishop_move(board,from_row,from_col,to_row,to_col,piece):
+        return True
+    return False
+    
+def is_valid_king_move(board,from_row,from_col,to_row,to_col,piece):
+    if not (0<=to_row<8 and 0<=to_col<8):
+        return False
+    
+    row_diff=abs(to_row-from_row)
+    col_diff=abs(to_col-from_col)
+
+    if row_diff<=1 and col_diff<=1:
+        if row_diff==0 and col_diff==0:
+            return False
+        target=board[to_row][to_col]
+
+        if target==".":
+            return True
+        
+        if piece.isupper() and target.islower():
+            return True
+        if piece.islower() and target.isupper():
+            return True
+
+    return False
+
+
 def notation_to_index(square):
     file=square[0]
     rank=int(square[1])
@@ -64,7 +184,6 @@ def move_piece(board,from_row,from_col,to_row,to_col):
     piece=board[from_row][from_col]
     board[to_row][to_col]=piece
     board[from_row][from_col]="."
-
 
 def move_piece_notation(board,from_square,to_square):
     global current_turn
@@ -92,27 +211,90 @@ def move_piece_notation(board,from_square,to_square):
             current_turn="black" if current_turn=="white" else "white"
         else:
             print("Invalid pawn move")
+    elif piece.upper()=="R":
+        if is_valid_rook_move(board,from_row,from_col,to_row,to_col,piece):
+            move_piece(board,from_row,from_col,to_row,to_col)
+            current_turn ="black" if current_turn=="white" else "white"
+        else:
+            print("Invalid rook move")
+    elif piece.upper()=="B":
+        if is_valid_bishop_move(board,from_row,from_col,to_row,to_col,piece):
+            move_piece(board,from_row,from_col,to_row,to_col)
+            current_turn ="black" if current_turn=="white" else "white"
+        else:
+            print("Invalid bishop move")
+
+    elif piece.upper()=="N":
+        if is_valid_knight_move(board,from_row,from_col,to_row,to_col,piece):
+            move_piece(board,from_row,from_col,to_row,to_col)
+            current_turn ="black" if current_turn=="white" else "white"
+        else:
+            print("Invalid knight move")
+    elif piece.upper()=="Q":
+        if is_valid_queen_move(board,from_row,from_col,to_row,to_col,piece):
+            move_piece(board,from_row,from_col,to_row,to_col)
+            current_turn ="black" if current_turn=="white" else "white"
+        else:
+            print("Invalid queen move")
+    elif piece.upper()=="K":
+        if is_valid_king_move(board,from_row,from_col,to_row,to_col,piece):
+            move_piece(board,from_row,from_col,to_row,to_col)
+            current_turn ="black" if current_turn=="white" else "white"
+        else:
+            print("Invalid king move")
+
     else:
-        print("Only white pawn validation implemented")
+        print("Piece validation is not implemented yet.")
+
+    
 
 
-# move_piece(board,7,6,5,5)
-for  row in board:
-    print(" ".join(row))
+
 
 move_piece_notation(board,"e2","e4")
-for  row in board:
-    print(" ".join(row))
+print_board(board)
+
+move_piece_notation(board,"e7","e5")
+print_board(board)
+
+move_piece_notation(board,"g1","f3")
+print_board(board)
+
+move_piece_notation(board,"b8","c6")
+print_board(board)
+
+move_piece_notation(board,"f1","c4")
+print_board(board)
+
+move_piece_notation(board,"f8","c5")
+print_board(board)
+
+move_piece_notation(board,"d1","e2")
+print_board(board)
+
+move_piece_notation(board,"d8","e7")
+print_board(board)
+
+move_piece_notation(board,"e1","d1")
+print_board(board)
+
+move_piece_notation(board,"e8","d8")
+print_board(board)
 
 
-move_piece_notation(board,"d7","d5")
-for  row in board:
-    print(" ".join(row))
 
 
-move_piece_notation(board,"e4","d5")
-for  row in board:
-    print(" ".join(row))
+
+
+
+
+
+
+
+
+
+
+
 
 
 
