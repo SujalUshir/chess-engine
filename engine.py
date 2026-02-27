@@ -17,21 +17,45 @@ board=[
 # for i in range(8):
 #     print("Row Number:",i,"is",board[i])
 
-def is_valid_white_pawn_move(board,from_row,from_col,to_row,to_col):
-    if from_col !=to_col:
+current_turn="white"
+
+
+
+
+def is_valid_pawn_move(board,from_row,from_col,to_row,to_col,piece):
+    if not (0<=to_row<8 and 0<=to_col<8):
         return False
-    if to_row==from_row-1 and board[to_row][to_col]==".":
-        return True
-    if from_row==6 and to_row==from_row-2:
-        if board[from_row-1][from_col]=="." and board[to_row][from_col]==".":
+    
+    direction=-1 if piece.isupper() else 1
+    start_row=6 if piece.isupper() else 1
+    
+    #single forward
+    if to_col==from_col and to_row==from_row+direction:
+        if board[to_row][to_col]==".":
             return True
+        
+    #double forward
+    if from_row==start_row and to_row==from_row+2*direction and to_col==from_col:
+        if board[from_row+direction][from_col]=="." and board[to_row][to_col]==".":
+            return True
+        
+    #diagonal capture
+    if abs(to_col-from_col)==1 and to_row==from_row+direction:
+        target=board[to_row][to_col]
+        if (target)!=".":
+            if piece.isupper() and target.islower():
+                return True
+            if piece.islower() and target.isupper():
+                return True
+               
+
     return False
 
 def notation_to_index(square):
     file=square[0]
     rank=int(square[1])
 
-    col=ord(file)-ord('a')
+    col=ord(file)-ord('a')  
     row=8-rank
 
     return row,col
@@ -43,21 +67,36 @@ def move_piece(board,from_row,from_col,to_row,to_col):
 
 
 def move_piece_notation(board,from_square,to_square):
+    global current_turn
+   
     from_row,from_col=notation_to_index(from_square)
     to_row,to_col=notation_to_index(to_square)
 
     piece=board[from_row][from_col]
 
-    if piece=="P":
-        if is_valid_white_pawn_move(board,from_row,from_col,to_row,to_col):
+    if piece==".":
+        print("No piece at source square")
+        return
+
+    if current_turn=="white" and piece.islower():
+        print("It is white's turn")
+        return
+    if current_turn=="black" and piece.isupper():
+        print("It is black's turn")
+        return
+
+    if piece.upper()=="P":
+        if is_valid_pawn_move(board,from_row,from_col,to_row,to_col,piece):
             move_piece(board,from_row,from_col,to_row,to_col)
+
+            current_turn="black" if current_turn=="white" else "white"
         else:
-            print("Invalis pawn move")
+            print("Invalid pawn move")
     else:
         print("Only white pawn validation implemented")
 
 
-move_piece(board,7,6,5,5)
+# move_piece(board,7,6,5,5)
 for  row in board:
     print(" ".join(row))
 
@@ -66,12 +105,12 @@ for  row in board:
     print(" ".join(row))
 
 
-move_piece_notation(board,"e4","e5")
+move_piece_notation(board,"d7","d5")
 for  row in board:
     print(" ".join(row))
 
 
-move_piece_notation(board,"e5","e7")
+move_piece_notation(board,"e4","d5")
 for  row in board:
     print(" ".join(row))
 
