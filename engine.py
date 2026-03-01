@@ -10,6 +10,15 @@ board=[
 ]
 
 current_turn="white"
+white_king_moved=False
+black_king_moved=False
+
+white_rook_a_moved=False
+white_rook_h_moved=False
+
+black_rook_a_moved=False
+black_rook_h_moved=False
+
 
 def print_board(board):
     print()
@@ -17,6 +26,42 @@ def print_board(board):
         print(8-i," ".join(board[i]))
     print(" a b c d e f g h")
     print()
+
+def square_under_attack(board,row,col,color):
+    opponent="black" if color=="white" else "white"
+
+    for r in range(8):
+        for c in range(8):
+            piece=board[r][c]
+            if piece==".":
+                continue
+            if opponent=="white" and piece.isupper():
+                if can_attack(board,r,c,row,col,piece):
+                    return True
+            if opponent=="black" and piece.islower():
+                if can_attack(board,r,c,row,col,piece):
+                    return True
+    return False
+                
+
+
+
+def is_checkmate(board,color):
+    if not is_king_in_check(board,color):
+        return False
+    if has_any_legal_moves(board,color):
+        return False
+
+    return True
+
+def is_stalemate(board,color):
+    if is_king_in_check(board,color):
+        return False
+    if has_any_legal_moves(board,color):
+        return False
+    
+    return True
+    
 
 
 
@@ -46,6 +91,45 @@ def can_attack(board,from_row,from_col,to_row,to_col,piece):
         return is_valid_king_move(board,from_row,from_col,to_row,to_col,piece)
     return False
 
+
+def has_any_legal_moves(board,color):
+    for from_row in range(8):
+        for from_col in range(8):
+            piece=board[from_row][from_col]
+            if piece==".":
+                continue
+            if color=="white" and piece.islower():
+                continue
+            if color=="black" and piece.isupper():
+                continue
+
+            for to_row in range(8):
+                for to_col in range(8):
+
+                    if not is_valid_move(board,from_row,from_col,to_row,to_col,piece):
+                        continue
+                    if not move_puts_own_king_in_check(board,from_row,from_col,to_row,to_col,piece):
+                        return True
+    
+    return False
+            
+
+def is_valid_move(board,from_row,from_col,to_row,to_col,piece):
+    piece_type=piece.upper()
+    if piece_type=="P":
+        return is_valid_pawn_move(board,from_row,from_col,to_row,to_col,piece)
+    if piece_type=="R":
+        return is_valid_rook_move(board,from_row,from_col,to_row,to_col,piece)
+    if piece_type=="B":
+        return is_valid_bishop_move(board,from_row,from_col,to_row,to_col,piece)
+    if piece_type=="N":
+        return is_valid_knight_move(board,from_row,from_col,to_row,to_col,piece)
+    if piece_type=="Q":
+        return is_valid_queen_move(board,from_row,from_col,to_row,to_col,piece)
+    if piece_type=="K":
+        return is_valid_king_move(board,from_row,from_col,to_row,to_col,piece)
+    return False
+
 def is_king_in_check(board,color):
     king_pos=find_king(board,color)
     if not king_pos:
@@ -69,7 +153,20 @@ def is_king_in_check(board,color):
                         
     return False
 
+def move_puts_own_king_in_check(board,from_row,from_col,to_row,to_col,piece):
+    original_from=board[from_row][from_col]
+    original_to=board[to_row][to_col]
 
+    board[to_row][to_col]=piece
+    board[from_row][from_col]="."
+
+    color="white" if piece.isupper() else "black"
+    in_check=is_king_in_check(board,color)
+
+    board[from_row][from_col]=original_from
+    board[to_row][to_col]=original_to
+
+    return in_check
 
 def is_valid_pawn_move(board,from_row,from_col,to_row,to_col,piece):
     if not (0<=to_row<8 and 0<=to_col<8):
@@ -200,6 +297,10 @@ def is_valid_queen_move(board,from_row,from_col,to_row,to_col,piece):
     return False
     
 def is_valid_king_move(board,from_row,from_col,to_row,to_col,piece):
+    global white_king_moved,black_king_moved
+    global white_rook_a_moved,white_rook_h_moved
+    global black_rook_a_moved,black_rook_h_moved
+
     if not (0<=to_row<8 and 0<=to_col<8):
         return False
     
@@ -218,7 +319,65 @@ def is_valid_king_move(board,from_row,from_col,to_row,to_col,piece):
             return True
         if piece.islower() and target.isupper():
             return True
-
+        return False
+    
+    if piece.isupper():
+        if white_king_moved:
+            return False
+        if from_row==7 and from_col==4 and to_row==7 and to_col==6:
+            if white_rook_h_moved:
+                return False
+            if board[7][5]!="." or board[7][6]!=".":
+                return False
+            if is_king_in_check(board,"white"):
+                return False
+            if square_under_attack(board,7,5,"white"):
+                return False
+            if square_under_attack(board,7,6,"white"):
+                return False
+            return  True
+        
+        if from_row==7 and from_col==4 and to_row==7 and to_col==2:
+            if white_rook_a_moved:
+                return False
+            if board[7][1]!="." or board[7][2]!="." or board[7][3]!=".":
+                return False
+            if is_king_in_check(board,"white"):
+                return False
+            if square_under_attack(board,7,3,"white"):
+                return False
+            if square_under_attack(board,7,2,"white"):
+                return False
+            return True
+    else:
+        if black_king_moved:
+            return False
+        if from_row==0 and from_col==4 and to_row==0 and to_col==6:
+            if black_rook_h_moved:
+                return False
+            if board[0][5]!="." or board[0][6]!=".":
+                return False
+            if is_king_in_check(board,"black"):
+                return False
+            if square_under_attack(board,0,5,"black"):
+                return False
+            if square_under_attack(board,0,6,"black"):
+                return False
+            return  True
+        
+        if from_row==0 and from_col==4 and to_row==0 and to_col==2:
+            if black_rook_a_moved:
+                return False
+            if board[0][1]!="." or board[0][2]!="." or board[0][3]!=".":
+                return False
+            if is_king_in_check(board,"black"):
+                return False
+            if square_under_attack(board,0,3,"black"):
+                return False
+            if square_under_attack(board,0,2,"black"):
+                return False
+            return True
+                        
     return False
 
 
@@ -255,61 +414,51 @@ def move_piece_notation(board,from_square,to_square):
         print("It is black's turn")
         return
 
-    if piece.upper()=="P":
-        if is_valid_pawn_move(board,from_row,from_col,to_row,to_col,piece):
-            move_piece(board,from_row,from_col,to_row,to_col)
+    if not is_valid_move(board,from_row,from_col,to_row,to_col,piece):
+        print("Invalid move")
+        return
 
-            current_turn="black" if current_turn=="white" else "white"
-            if is_king_in_check(board,current_turn):
-                print(f"{current_turn} king is in check!")
-        else:
-            print("Invalid pawn move")
-    elif piece.upper()=="R":
-        if is_valid_rook_move(board,from_row,from_col,to_row,to_col,piece):
-            move_piece(board,from_row,from_col,to_row,to_col)
-            current_turn ="black" if current_turn=="white" else "white"
-            if is_king_in_check(board,current_turn):
-                print(f"{current_turn} king is in check!")
-        else:
-            print("Invalid rook move")
-    elif piece.upper()=="B":
-        if is_valid_bishop_move(board,from_row,from_col,to_row,to_col,piece):
-            move_piece(board,from_row,from_col,to_row,to_col)
-            current_turn ="black" if current_turn=="white" else "white"
-            if is_king_in_check(board,current_turn):
-                print(f"{current_turn} king is in check!")
-        else:
-            print("Invalid bishop move")
+    if move_puts_own_king_in_check(board,from_row,from_col,to_row,to_col,piece):
+                print("Illeagal move: King would be in check")
+                return
+            
+    move_piece(board,from_row,from_col,to_row,to_col)
+    if piece.upper()=="K":
+        if from_col==4 and to_col==6:
+            move_piece(board,from_row,7,from_row,5)
+        elif from_col==4 and to_col==2:
+            move_piece(board,from_row,0,from_row,3)
 
-    elif piece.upper()=="N":
-        if is_valid_knight_move(board,from_row,from_col,to_row,to_col,piece):
-            move_piece(board,from_row,from_col,to_row,to_col)
-            current_turn ="black" if current_turn=="white" else "white"
-            if is_king_in_check(board,current_turn):
-                print(f"{current_turn} king is in check!")
-        else:
-            print("Invalid knight move")
-    elif piece.upper()=="Q":
-        if is_valid_queen_move(board,from_row,from_col,to_row,to_col,piece):
-            move_piece(board,from_row,from_col,to_row,to_col)
-            current_turn ="black" if current_turn=="white" else "white"
-            if is_king_in_check(board,current_turn):
-                print(f"{current_turn} king is in check!")
-        else:
-            print("Invalid queen move")
-    elif piece.upper()=="K":
-        if is_valid_king_move(board,from_row,from_col,to_row,to_col,piece):
-            move_piece(board,from_row,from_col,to_row,to_col)
-            current_turn ="black" if current_turn=="white" else "white"
-            if is_king_in_check(board,current_turn):
-                print(f"{current_turn} king is in check!")
-        else:
-            print("Invalid king move")
+    global white_king_moved,black_king_moved
+    global white_rook_a_moved,white_rook_h_moved
+    global black_rook_a_moved,black_rook_h_moved
 
-    else:
-        print("Piece validation is not implemented yet.")
+    if piece=="K":
+        white_king_moved=True
+    if piece=="k":
+        black_king_moved=True
 
-    
+    if piece=="R":
+        if from_row==7 and from_col==0:
+            white_rook_a_moved=True
+        if from_row==7 and from_col==7:
+            white_rook_h_moved=True
+    if piece=="r":
+        if from_row==0 and from_col==0:
+            black_rook_a_moved=True
+        if from_row==0 and from_col==7:
+            black_rook_h_moved=True
+        
+            
+
+    current_turn="black" if current_turn=="white" else "white"
+    if is_checkmate(board,current_turn):
+        print(f"Checkmate! {'white' if current_turn=='black' else 'black'} wins!")
+    elif is_stalemate(board,current_turn):
+        print("Stalemate! Draw.")
+    elif is_king_in_check(board,current_turn):
+        print(f"{current_turn} king is in check!")
+        
 
 
 
@@ -344,18 +493,32 @@ def move_piece_notation(board,from_square,to_square):
 # move_piece_notation(board,"e8","d8")
 # print_board(board)
 
+# move_piece_notation(board,"e2","e4")
+# move_piece_notation(board,"f7","f6")
+# move_piece_notation(board,"d1","h5")
+
+
+
+# move_piece_notation(board,"e2","e4")
+# move_piece_notation(board,"d8","h4")
+# move_piece_notation(board,"a2","a3")
+
+# move_piece_notation(board,"f2","f3")
+# move_piece_notation(board,"e7","e5")
+# move_piece_notation(board,"g2","g4")
+# move_piece_notation(board,"d8","h4")
+
 move_piece_notation(board,"e2","e4")
-move_piece_notation(board,"f7","f6")
-move_piece_notation(board,"d1","h5")
+move_piece_notation(board,"e7","e5")
 
+move_piece_notation(board,"g1","f3")
+move_piece_notation(board,"b8","c6")
 
+move_piece_notation(board,"f1","e2")
+move_piece_notation(board,"g8","f6")
 
-
-
-
-
-
-
+move_piece_notation(board,"e1","g1")
+print_board(board)
 
 
 
