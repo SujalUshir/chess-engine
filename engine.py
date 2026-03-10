@@ -1,3 +1,6 @@
+########################################
+# BOARD INITIALIZATION
+########################################
 board=[
     ["r","n","b","q","k","b","n","r"],
     ["p","p","p","p","p","p","p","p"],
@@ -21,18 +24,15 @@ black_rook_h_moved=False
 
 en_passant_target=None
 
+
+########################################
+# UTILITY FUNCTIONS
+########################################
 def copy_board(board):
     new_board=[]
     for row in board:
         new_board.append(row[:])
     return new_board
-
-def print_board(board):
-    print()
-    for i in range(8):
-        print(8-i," ".join(board[i]))
-    print(" a b c d e f g h")
-    print()
 
 def can_capture(piece,target):
     if target==".":
@@ -43,149 +43,47 @@ def can_capture(piece,target):
         return True
     return False
 
+def notation_to_index(square):
+    file=square[0]
+    rank=int(square[1])
 
-def square_under_attack(board,row,col,color):
-    opponent="black" if color=="white" else "white"
+    col=ord(file)-ord('a')  
+    row=8-rank
 
+    return row,col
+
+def index_to_notation(row,col):
+    file=chr(col+ord('a'))
+    rank=str(8-row)
+    return file+rank
+
+
+########################################
+# BOARD DISPLAY
+########################################
+def print_board(board):
+    print()
+    for i in range(8):
+        print(8-i," ".join(board[i]))
+    print(" a b c d e f g h")
+    print()
+
+
+########################################
+# POSITION EVALUATION
+########################################
+def evaluate_board(board):
+    values={"P":1,"N":3,"B":3,"R":5,"Q":9,"K":0,"p":-1,"n":-3,"b":-3,"r":-5,"q":-9,"k":0}
+    score=0
     for r in range(8):
         for c in range(8):
             piece=board[r][c]
-            if piece==".":
-                continue
-            if opponent=="white" and piece.isupper():
-                if can_attack(board,r,c,row,col,piece):
-                    return True
-            if opponent=="black" and piece.islower():
-                if can_attack(board,r,c,row,col,piece):
-                    return True
-    return False
-                
-
-
-
-def is_checkmate(board,color):
-    if not is_king_in_check(board,color):
-        return False
-    if has_any_legal_moves(board,color):
-        return False
-
-    return True
-
-def is_stalemate(board,color):
-    if is_king_in_check(board,color):
-        return False
-    if has_any_legal_moves(board,color):
-        return False
-    
-    return True
-    
-
-
-
-def find_king(board,color):
-    king_symbol="K" if color=="white" else "k"
-    for r in range(8):
-        for c in range(8):
-            if board[r][c]==king_symbol:
-                return r,c
-    return None
-
-def can_attack(board,from_row,from_col,to_row,to_col,piece):
-    piece_type=piece.upper()
-    if piece_type=="P":
-        direction=-1 if piece.isupper() else 1
-        return(abs(to_col-from_col)==1 and to_row==from_row+direction)
-    elif piece_type=="R":
-        return is_valid_rook_move(board,from_row,from_col,to_row,to_col,piece)
-    elif piece_type=="B":
-        return is_valid_bishop_move(board,from_row,from_col,to_row,to_col,piece)
-    elif piece_type=="N":
-        return is_valid_knight_move(board,from_row,from_col,to_row,to_col,piece)
-    elif piece_type=="Q":
-        return is_valid_queen_move(board,from_row,from_col,to_row,to_col,piece)
-    elif piece_type=="K":
-        row_diff=abs(to_row-from_row)
-        col_diff=abs(to_col-from_col)
-        return row_diff<=1 and col_diff<=1
-    return False
-
-
-def has_any_legal_moves(board,color):
-    for from_row in range(8):
-        for from_col in range(8):
-            piece=board[from_row][from_col]
-            if piece==".":
-                continue
-            if color=="white" and piece.islower():
-                continue
-            if color=="black" and piece.isupper():
-                continue
-
-            for to_row in range(8):
-                for to_col in range(8):
-
-                    if not is_valid_move(board,from_row,from_col,to_row,to_col,piece):
-                        continue
-                    if not move_puts_own_king_in_check(board,from_row,from_col,to_row,to_col,piece):
-                        return True
-    
-    return False
-            
-
-def is_valid_move(board,from_row,from_col,to_row,to_col,piece):
-    piece_type=piece.upper()
-    if piece_type=="P":
-        return is_valid_pawn_move(board,from_row,from_col,to_row,to_col,piece)
-    if piece_type=="R":
-        return is_valid_rook_move(board,from_row,from_col,to_row,to_col,piece)
-    if piece_type=="B":
-        return is_valid_bishop_move(board,from_row,from_col,to_row,to_col,piece)
-    if piece_type=="N":
-        return is_valid_knight_move(board,from_row,from_col,to_row,to_col,piece)
-    if piece_type=="Q":
-        return is_valid_queen_move(board,from_row,from_col,to_row,to_col,piece)
-    if piece_type=="K":
-        return is_valid_king_move(board,from_row,from_col,to_row,to_col,piece)
-    return False
-
-def is_king_in_check(board,color):
-    king_pos=find_king(board,color)
-    if not king_pos:
-        return False
-    
-    king_row,king_col=king_pos
-    opponent="black" if color=="white" else "white"
-
-    for r in range(8):
-        for c in range(8):
-            piece=board[r][c]
-            if piece==".":
-                    continue
-            
-            if opponent=="white"and piece.isupper():
-                if can_attack(board,r,c,king_row,king_col,piece):
-                    return True
-            if opponent=="black"and piece.islower():
-                if can_attack(board,r,c,king_row,king_col,piece):
-                    return True
-                        
-    return False
-
-def move_puts_own_king_in_check(board,from_row,from_col,to_row,to_col,piece):
-    original_from=board[from_row][from_col]
-    original_to=board[to_row][to_col]
-
-    board[to_row][to_col]=piece
-    board[from_row][from_col]="."
-
-    color="white" if piece.isupper() else "black"
-    in_check=is_king_in_check(board,color)
-
-    board[from_row][from_col]=original_from
-    board[to_row][to_col]=original_to
-
-    return in_check
-
+            if piece!=".":
+                score+=values[piece]
+    return score
+########################################
+# PIECE MOVEMENT RULES
+########################################
 def is_valid_pawn_move(board,from_row,from_col,to_row,to_col,piece):
     if not (0<=to_row<8 and 0<=to_col<8):
         return False
@@ -366,14 +264,190 @@ def is_valid_king_move(board,from_row,from_col,to_row,to_col,piece):
     return False
 
 
-def notation_to_index(square):
-    file=square[0]
-    rank=int(square[1])
+########################################
+# ATTACK DETECTION
+########################################
+def can_attack(board,from_row,from_col,to_row,to_col,piece):
+    piece_type=piece.upper()
+    if piece_type=="P":
+        direction=-1 if piece.isupper() else 1
+        if (abs(to_col-from_col)==1 and to_row==from_row+direction):
+            return True
+        return False
+            
+    elif piece_type=="R":
+        return is_valid_rook_move(board,from_row,from_col,to_row,to_col,piece)
+    elif piece_type=="B":
+        return is_valid_bishop_move(board,from_row,from_col,to_row,to_col,piece)
+    elif piece_type=="N":
+        return is_valid_knight_move(board,from_row,from_col,to_row,to_col,piece)
+    elif piece_type=="Q":
+        return is_valid_queen_move(board,from_row,from_col,to_row,to_col,piece)
+    elif piece_type=="K":
+        row_diff=abs(to_row-from_row)
+        col_diff=abs(to_col-from_col)
+        return row_diff<=1 and col_diff<=1
+    return False
 
-    col=ord(file)-ord('a')  
-    row=8-rank
+def square_under_attack(board,row,col,color):
+    opponent="black" if color=="white" else "white"
 
-    return row,col
+    for r in range(8):
+        for c in range(8):
+            piece=board[r][c]
+            if piece==".":
+                continue
+            if opponent=="white" and piece.isupper():
+                if can_attack(board,r,c,row,col,piece):
+                    return True
+            if opponent=="black" and piece.islower():
+                if can_attack(board,r,c,row,col,piece):
+                    return True
+    return False
+
+
+
+########################################
+# MOVE VALIDATION
+########################################
+def is_valid_move(board,from_row,from_col,to_row,to_col,piece):
+    piece_type=piece.upper()
+    if piece_type=="P":
+        return is_valid_pawn_move(board,from_row,from_col,to_row,to_col,piece)
+    if piece_type=="R":
+        return is_valid_rook_move(board,from_row,from_col,to_row,to_col,piece)
+    if piece_type=="B":
+        return is_valid_bishop_move(board,from_row,from_col,to_row,to_col,piece)
+    if piece_type=="N":
+        return is_valid_knight_move(board,from_row,from_col,to_row,to_col,piece)
+    if piece_type=="Q":
+        return is_valid_queen_move(board,from_row,from_col,to_row,to_col,piece)
+    if piece_type=="K":
+        return is_valid_king_move(board,from_row,from_col,to_row,to_col,piece)
+    return False
+
+def move_puts_own_king_in_check(board,from_row,from_col,to_row,to_col,piece):
+    temp_board=copy_board(board)
+
+    temp_board[to_row][to_col]=piece
+    temp_board[from_row][from_col]="."
+
+    color="white" if piece.isupper() else "black"
+    return is_king_in_check(temp_board,color)
+
+
+########################################
+# GAME STATE DETECTION
+########################################
+def find_king(board,color):
+    king_symbol="K" if color=="white" else "k"
+    for r in range(8):
+        for c in range(8):
+            if board[r][c]==king_symbol:
+                return r,c
+    return None
+        
+def is_king_in_check(board,color):
+    king_pos=find_king(board,color)
+    if not king_pos:
+        return False
+    
+    king_row,king_col=king_pos
+    opponent="black" if color=="white" else "white"
+
+    for r in range(8):
+        for c in range(8):
+            piece=board[r][c]
+            if piece==".":
+                    continue
+            
+            if opponent=="white"and piece.isupper():
+                if can_attack(board,r,c,king_row,king_col,piece):
+                    return True
+            if opponent=="black"and piece.islower():
+                if can_attack(board,r,c,king_row,king_col,piece):
+                    return True
+                        
+    return False
+
+def has_any_legal_moves(board,color):
+    for from_row in range(8):
+        for from_col in range(8):
+            piece=board[from_row][from_col]
+            if piece==".":
+                continue
+            if color=="white" and piece.islower():
+                continue
+            if color=="black" and piece.isupper():
+                continue
+
+            for to_row in range(8):
+                for to_col in range(8):
+
+                    if not is_valid_move(board,from_row,from_col,to_row,to_col,piece):
+                        continue
+                    if not move_puts_own_king_in_check(board,from_row,from_col,to_row,to_col,piece):
+                        return True
+    
+    return False
+  
+def is_checkmate(board,color):
+    if not is_king_in_check(board,color):
+        return False
+    if has_any_legal_moves(board,color):
+        return False
+
+    return True
+
+def is_stalemate(board,color):
+    if is_king_in_check(board,color):
+        return False
+    if has_any_legal_moves(board,color):
+        return False
+    
+    return True
+ 
+
+########################################
+# MOVE GENERATION
+########################################
+def generate_all_legal_moves(board,color):
+    moves=[]
+
+    for from_row in range(8):
+        for from_col in range(8):
+            piece=board[from_row][from_col]
+            if piece==".":
+                continue
+
+            if color=="white" and piece.islower():
+                continue
+            if color=="black" and piece.isupper():
+                continue
+
+            for to_row in range(8):
+                for to_col in range(8):
+                    if not is_valid_move(board,from_row,from_col,to_row,to_col,piece):
+                        continue
+                    if move_puts_own_king_in_check(board,from_row,from_col,to_row,to_col,piece):
+                        continue
+                    from_sq=index_to_notation(from_row,from_col)
+                    to_sq=index_to_notation(to_row,to_col)
+
+                    moves.append((from_sq,to_sq))
+
+    return moves
+
+########################################
+# MOVE EXECUTION
+########################################
+def make_move_copy(board,from_row,from_col,to_row,to_col):
+    new_board=copy_board(board)
+    piece=new_board[from_row][from_col]
+    new_board[to_row][to_col]=piece
+    new_board[from_row][from_col]="."
+    return new_board
+
 
 def move_piece(board,from_row,from_col,to_row,to_col):
     piece=board[from_row][from_col]
@@ -405,9 +479,10 @@ def move_piece_notation(board,from_square,to_square):
         return
 
     if move_puts_own_king_in_check(board,from_row,from_col,to_row,to_col,piece):
-                print("Illeagal move: King would be in check")
+                print("Illegal move: King would be in check")
                 return
-            
+    
+    print(f"{current_turn}: {from_square} -> {to_square}")   
     previous_en_passant=en_passant_target
     move_piece(board,from_row,from_col,to_row,to_col)
     
@@ -454,78 +529,145 @@ def move_piece_notation(board,from_square,to_square):
     current_turn="black" if current_turn=="white" else "white"
     if is_checkmate(board,current_turn):
         print(f"Checkmate! {'white' if current_turn=='black' else 'black'} wins!")
+        return
     elif is_stalemate(board,current_turn):
         print("Stalemate! Draw.")
+        return
     elif is_king_in_check(board,current_turn):
         print(f"{current_turn} king is in check!")
+    print_board(board)
+    print("--------------------------------")
+    
+########################################
+# MINIMAX SEARCH
+########################################
+def minimax(board,depth,maximizing_player):
+    if depth==0:
+        return evaluate_board(board)
+    if maximizing_player:
+        max_eval=-9999
+        moves=generate_all_legal_moves(board,"white")
+
+        for move in moves:
+            from_sq,to_sq=move
+            fr,fc=notation_to_index(from_sq)
+            tr,tc=notation_to_index(to_sq)
+
+            new_board=make_move_copy(board,fr,fc,tr,tc)
+            eval=minimax(new_board,depth-1,False)
+            max_eval=max(max_eval,eval)
+        return max_eval
+    else:
+        min_eval=9999
+        moves=generate_all_legal_moves(board,"black")
+        for move in moves:
+            from_sq,to_sq=move
+            fr,fc=notation_to_index(from_sq)
+            tr,tc=notation_to_index(to_sq)
+
+            new_board=make_move_copy(board,fr,fc,tr,tc)
+            eval=minimax(new_board,depth-1,True)
+            min_eval=min(min_eval,eval)
+        return min_eval
+    
+########################################
+# BEST MOVE SEARCH
+########################################
+def find_best_move(board,depth):
+    best_move=None
+    best_eval=-9999
+
+    moves=generate_all_legal_moves(board,"white")
+    for move in moves:
+        from_sq,to_sq=move
+        fr,fc=notation_to_index(from_sq)
+        tr,tc=notation_to_index(to_sq)
         
+        new_board=make_move_copy(board,fr,fc,tr,tc)
+        eval=minimax(new_board,depth-1,False)
+        if eval>best_eval:
+            best_eval=eval
+            best_move=move
+    return best_move
 
 
 
+########################################
+# TESTING
+########################################
 
-# move_piece_notation(board,"e2","e4")
-# print_board(board)
+if __name__ == "__main__":
+    # move_piece_notation(board,"e2","e4")
+    # print_board(board)
 
-# move_piece_notation(board,"e7","e5")
-# print_board(board)
+    # move_piece_notation(board,"e7","e5")
+    # print_board(board)
 
-# move_piece_notation(board,"g1","f3")
-# print_board(board)
+    # move_piece_notation(board,"g1","f3")
+    # print_board(board)
 
-# move_piece_notation(board,"b8","c6")
-# print_board(board)
+    # move_piece_notation(board,"b8","c6")
+    # print_board(board)
 
-# move_piece_notation(board,"f1","c4")
-# print_board(board)
+    # move_piece_notation(board,"f1","c4")
+    # print_board(board)
 
-# move_piece_notation(board,"f8","c5")
-# print_board(board)
+    # move_piece_notation(board,"f8","c5")
+    # print_board(board)
 
-# move_piece_notation(board,"d1","e2")
-# print_board(board)
+    # move_piece_notation(board,"d1","e2")
+    # print_board(board)
 
-# move_piece_notation(board,"d8","e7")
-# print_board(board)
+    # move_piece_notation(board,"d8","e7")
+    # print_board(board)
 
-# move_piece_notation(board,"e1","d1")
-# print_board(board)
+    # move_piece_notation(board,"e1","d1")
+    # print_board(board)
 
-# move_piece_notation(board,"e8","d8")
-# print_board(board)
+    # move_piece_notation(board,"e8","d8")
+    # print_board(board)
 
-# move_piece_notation(board,"e2","e4")
-# move_piece_notation(board,"f7","f6")
-# move_piece_notation(board,"d1","h5")
-
-
-
-# move_piece_notation(board,"e2","e4")
-# move_piece_notation(board,"d8","h4")
-# move_piece_notation(board,"a2","a3")
-
-# move_piece_notation(board,"f2","f3")
-# move_piece_notation(board,"e7","e5")
-# move_piece_notation(board,"g2","g4")
-# move_piece_notation(board,"d8","h4")
-
-# move_piece_notation(board,"e2","e4")
-# move_piece_notation(board,"e7","e5")
-
-# move_piece_notation(board,"g1","f3")
-# move_piece_notation(board,"b8","c6")
-
-# move_piece_notation(board,"f1","e2")
-# move_piece_notation(board,"g8","f6")
-
-# move_piece_notation(board,"e1","g1")
+    # move_piece_notation(board,"e2","e4")
+    # move_piece_notation(board,"f7","f6")
+    # move_piece_notation(board,"d1","h5")
 
 
-move_piece_notation(board,"e2","e4")
-move_piece_notation(board,"a7","a6")
 
-move_piece_notation(board,"e4","e5")
-move_piece_notation(board,"d7","d5")
+    # move_piece_notation(board,"e2","e4")
+    # move_piece_notation(board,"d8","h4")
+    # move_piece_notation(board,"a2","a3")
 
-move_piece_notation(board,"e5","d6")
+    # move_piece_notation(board,"f2","f3")
+    # move_piece_notation(board,"e7","e5")
+    # move_piece_notation(board,"g2","g4")
+    # move_piece_notation(board,"d8","h4")
 
-print_board(board)
+    # move_piece_notation(board,"e2","e4")
+    # move_piece_notation(board,"e7","e5")
+
+    # move_piece_notation(board,"g1","f3")
+    # move_piece_notation(board,"b8","c6")
+
+    # move_piece_notation(board,"f1","e2")
+    # move_piece_notation(board,"g8","f6")
+
+    # move_piece_notation(board,"e1","g1")
+
+
+    # move_piece_notation(board,"e2","e4")
+    # move_piece_notation(board,"a7","a6")
+
+    # move_piece_notation(board,"e4","e5")
+    # move_piece_notation(board,"d7","d5")
+
+    # move_piece_notation(board,"e5","d6")
+
+    # print(len(generate_all_legal_moves(board,"white")))
+    # print(evaluate_board(board))
+
+    # print(minimax(board,1,True))
+    # best = find_best_move(board,2)
+    # print(best)
+
+    best = find_best_move(board,2)
+    move_piece_notation(board,best[0],best[1])
