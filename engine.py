@@ -11,7 +11,7 @@ board=[
     ["P","P","P","P","P","P","P","P"],
     ["R","N","B","Q","K","B","N","R"],
 ]
-
+ENGINE_DEPTH = 3
 current_turn="white"
 white_king_moved=False
 black_king_moved=False
@@ -23,6 +23,50 @@ black_rook_a_moved=False
 black_rook_h_moved=False
 
 en_passant_target=None
+
+########################################
+# ACTUAL GAME FUNCTIONS
+########################################
+def engine_move(board,depth):
+    print(f"{current_turn} engine thinking...")
+    best=find_best_move(board,depth)
+    if best is None:
+        print("Game over")
+        return False
+    print(f"Engine plays: {best[0]} -> {best[1]}")
+    move_piece_notation(board,best[0],best[1])
+    if is_checkmate(board,current_turn) or is_stalemate(board,current_turn):
+        print("Game already finished")
+        return False
+    return True
+
+def human_move(board):
+    move=input("Enter move (e2 e4): ").split()
+
+    if len(move)!=2:
+        print("Invalid format")
+        return
+    from_sq,to_sq=move
+    move_piece_notation(board,from_sq,to_sq)
+
+def engine_vs_engine(board):
+    print_board(board)
+
+    while True:
+        if is_checkmate(board,current_turn) or is_stalemate(board,current_turn):
+            break
+        if not engine_move(board,ENGINE_DEPTH):
+            break
+
+def human_vs_engine(board):
+    print_board(board)
+
+    while True:
+        if current_turn=="white":
+            human_move(board)
+        else:
+            if not engine_move(board,ENGINE_DEPTH):
+                break
 
 
 ########################################
@@ -438,6 +482,13 @@ def generate_all_legal_moves(board,color):
 
     return moves
 
+def is_capture_move(board,move):
+    from_sq,to_sq=move
+    fr,fc=notation_to_index(from_sq)
+    tr,tc=notation_to_index(to_sq)
+
+    return board[tr][tc]!="."
+
 ########################################
 # MOVE EXECUTION
 ########################################
@@ -541,12 +592,13 @@ def move_piece_notation(board,from_square,to_square):
 ########################################
 # MINIMAX SEARCH
 ########################################
-def minimax(board,depth,maximizing_player):
+def minimax(board,depth,alpha,beta,maximizing_player):
     if depth==0:
         return evaluate_board(board)
     if maximizing_player:
         max_eval=-9999
         moves=generate_all_legal_moves(board,"white")
+        moves.sort(key=lambda move: is_capture_move(board,move),reverse=True)
 
         for move in moves:
             from_sq,to_sq=move
@@ -554,40 +606,63 @@ def minimax(board,depth,maximizing_player):
             tr,tc=notation_to_index(to_sq)
 
             new_board=make_move_copy(board,fr,fc,tr,tc)
-            eval=minimax(new_board,depth-1,False)
+            eval=minimax(new_board,depth-1,alpha,beta,False)
             max_eval=max(max_eval,eval)
+            alpha=max(alpha,eval)
+
+            if beta<=alpha:
+                break
         return max_eval
     else:
         min_eval=9999
         moves=generate_all_legal_moves(board,"black")
+        moves.sort(key=lambda move: is_capture_move(board,move),reverse=True)
         for move in moves:
             from_sq,to_sq=move
             fr,fc=notation_to_index(from_sq)
             tr,tc=notation_to_index(to_sq)
 
             new_board=make_move_copy(board,fr,fc,tr,tc)
-            eval=minimax(new_board,depth-1,True)
+            eval=minimax(new_board,depth-1,alpha,beta,True)
             min_eval=min(min_eval,eval)
+            beta=min(beta,eval)
+
+            if beta<=alpha:
+                break
         return min_eval
     
 ########################################
 # BEST MOVE SEARCH
 ########################################
 def find_best_move(board,depth):
-    best_move=None
-    best_eval=-9999
 
-    moves=generate_all_legal_moves(board,"white")
+    global current_turn
+
+    best_move=None
+    if current_turn=="white":
+        best_eval=-9999
+    else:
+        best_eval=9999
+
+    moves=generate_all_legal_moves(board,current_turn)
+    moves.sort(key=lambda move: is_capture_move(board,move),reverse=True)
     for move in moves:
         from_sq,to_sq=move
         fr,fc=notation_to_index(from_sq)
         tr,tc=notation_to_index(to_sq)
         
         new_board=make_move_copy(board,fr,fc,tr,tc)
-        eval=minimax(new_board,depth-1,False)
-        if eval>best_eval:
-            best_eval=eval
-            best_move=move
+
+        if current_turn=="white":
+            eval=minimax(new_board,depth-1,-9999,9999,False)
+            if eval>best_eval:
+                best_eval=eval
+                best_move=move
+        else:
+            eval=minimax(new_board,depth-1,-9999,9999,True)
+            if eval<best_eval:
+                best_eval=eval
+                best_move=move
     return best_move
 
 
@@ -662,7 +737,6 @@ if __name__ == "__main__":
 
     # move_piece_notation(board,"e5","d6")
 
-<<<<<<< HEAD
     # print(len(generate_all_legal_moves(board,"white")))
     # print(evaluate_board(board))
 
@@ -670,10 +744,19 @@ if __name__ == "__main__":
     # best = find_best_move(board,2)
     # print(best)
 
-    best = find_best_move(board,2)
-    move_piece_notation(board,best[0],best[1])
-=======
-print_board(board)
+    # best = find_best_move(board,3)
+    # if best is None:
+    #     print("Game over")
+    # else:
+    #     move_piece_notation(board,best[0],best[1])
+    print("1 - Engine vs Engine")
+    print("2 - Human vs Engine")
 
-#ajj to
->>>>>>> 5f6adc65d5a0ab4756fe7fe0fac1c2a00acda59c
+    choice=input("Select mode: ")
+
+    if choice=="1":
+        engine_vs_engine(board)
+
+    elif choice=="2":
+        human_vs_engine(board)
+
