@@ -662,6 +662,7 @@ if __name__ == "__main__":
 
     # move_piece_notation(board,"e5","d6")
 
+<<<<<<< HEAD
     # print(len(generate_all_legal_moves(board,"white")))
     # print(evaluate_board(board))
 
@@ -671,3 +672,8 @@ if __name__ == "__main__":
 
     best = find_best_move(board,2)
     move_piece_notation(board,best[0],best[1])
+=======
+print_board(board)
+
+#ajj to
+>>>>>>> 5f6adc65d5a0ab4756fe7fe0fac1c2a00acda59c
