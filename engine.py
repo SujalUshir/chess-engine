@@ -114,16 +114,123 @@ def print_board(board):
 
 
 ########################################
+# PIECE SQUARE TABLES
+########################################
+
+pawn_table = [
+[0,0,0,0,0,0,0,0],
+[5,5,5,5,5,5,5,5],
+[1,1,2,3,3,2,1,1],
+[0.5,0.5,1,2.5,2.5,1,0.5,0.5],
+[0,0,0,2,2,0,0,0],
+[0.5,-0.5,-1,0,0,-1,-0.5,0.5],
+[0.5,1,1,-2,-2,1,1,0.5],
+[0,0,0,0,0,0,0,0]
+]
+
+knight_table = [
+[-5,-4,-3,-3,-3,-3,-4,-5],
+[-4,-2,0,0,0,0,-2,-4],
+[-3,0,1,1.5,1.5,1,0,-3],
+[-3,0.5,1.5,2,2,1.5,0.5,-3],
+[-3,0,1.5,2,2,1.5,0,-3],
+[-3,0.5,1,1.5,1.5,1,0.5,-3],
+[-4,-2,0,0.5,0.5,0,-2,-4],
+[-5,-4,-3,-3,-3,-3,-4,-5]
+]
+
+bishop_table = [
+[-2,-1,-1,-1,-1,-1,-1,-2],
+[-1,0,0,0,0,0,0,-1],
+[-1,0,0.5,1,1,0.5,0,-1],
+[-1,0.5,0.5,1,1,0.5,0.5,-1],
+[-1,0,1,1,1,1,0,-1],
+[-1,1,1,1,1,1,1,-1],
+[-1,0.5,0,0,0,0,0.5,-1],
+[-2,-1,-1,-1,-1,-1,-1,-2]
+]
+
+rook_table = [
+[0,0,0,0,0,0,0,0],
+[0.5,1,1,1,1,1,1,0.5],
+[-0.5,0,0,0,0,0,0,-0.5],
+[-0.5,0,0,0,0,0,0,-0.5],
+[-0.5,0,0,0,0,0,0,-0.5],
+[-0.5,0,0,0,0,0,0,-0.5],
+[-0.5,0,0,0,0,0,0,-0.5],
+[0,0,0,0.5,0.5,0,0,0]
+]
+
+queen_table = [
+[-2,-1,-1,-0.5,-0.5,-1,-1,-2],
+[-1,0,0,0,0,0,0,-1],
+[-1,0,0.5,0.5,0.5,0.5,0,-1],
+[-0.5,0,0.5,0.5,0.5,0.5,0,-0.5],
+[0,0,0.5,0.5,0.5,0.5,0,-0.5],
+[-1,0.5,0.5,0.5,0.5,0.5,0,-1],
+[-1,0,0.5,0,0,0,0,-1],
+[-2,-1,-1,-0.5,-0.5,-1,-1,-2]
+]
+
+king_table = [
+[-3,-4,-4,-5,-5,-4,-4,-3],
+[-3,-4,-4,-5,-5,-4,-4,-3],
+[-3,-4,-4,-5,-5,-4,-4,-3],
+[-3,-4,-4,-5,-5,-4,-4,-3],
+[-2,-3,-3,-4,-4,-3,-3,-2],
+[-1,-2,-2,-2,-2,-2,-2,-1],
+[2,2,0,0,0,0,2,2],
+[2,3,1,0,0,1,3,2]
+]
+
+########################################
 # POSITION EVALUATION
 ########################################
 def evaluate_board(board):
-    values={"P":1,"N":3,"B":3,"R":5,"Q":9,"K":0,"p":-1,"n":-3,"b":-3,"r":-5,"q":-9,"k":0}
+    piece_values={"P":100,"N":320,"B":330,"R":500,"Q":900,"K":0,"p":-100,"n":-320,"b":-330,"r":-500,"q":-900,"k":0}
     score=0
     for r in range(8):
         for c in range(8):
             piece=board[r][c]
-            if piece!=".":
-                score+=values[piece]
+            if piece==".":
+                continue
+            score+=piece_values[piece]
+            if piece=="P":
+                score+=pawn_table[r][c]*10
+
+            elif piece=="p":
+                score-=pawn_table[7-r][c]*10
+
+            elif piece=="N":
+                score+=knight_table[r][c]*10
+
+            elif piece=="n":
+                score-=knight_table[7-r][c]*10
+
+            elif piece=="B":
+                score+=bishop_table[r][c]*10
+
+            elif piece=="b":
+                score-=bishop_table[7-r][c]*10
+
+            elif piece=="R":
+                score+=rook_table[r][c]*10
+
+            elif piece=="r":
+                score-=rook_table[7-r][c]*10
+
+            elif piece=="Q":
+                score+=queen_table[r][c]*10
+
+            elif piece=="q":
+                score-=queen_table[7-r][c]*10
+
+            elif piece=="K":
+                score+=king_table[r][c]*10
+
+            elif piece=="k":
+                score-=king_table[7-r][c]*10
+
     return score
 ########################################
 # PIECE MOVEMENT RULES
@@ -590,11 +697,86 @@ def move_piece_notation(board,from_square,to_square):
     print("--------------------------------")
     
 ########################################
+# QUIESCENCE SEARCH
+########################################
+def quiescence(board,alpha,beta,maximizing_player,depth=0):
+    stand_pat=evaluate_board(board)
+    if depth>=6:
+        return stand_pat
+    if maximizing_player:
+        if stand_pat>=beta:
+            return beta
+        if alpha<stand_pat:
+            alpha=stand_pat
+        moves=generate_capture_moves(board,"white")
+
+        for move in moves:
+            from_sq,to_sq=move
+            fr,fc=notation_to_index(from_sq)
+            tr,tc=notation_to_index(to_sq)
+
+            new_board=make_move_copy(board,fr,fc,tr,tc)
+            score=quiescence(new_board,alpha,beta,False,depth+1)
+
+            if score>=beta:
+                return beta
+            if score>alpha:
+                alpha=score
+        return alpha
+    else:
+        if stand_pat<=alpha:
+            return alpha
+        if beta>stand_pat:
+            beta=stand_pat
+        moves=generate_capture_moves(board,"black")
+
+        for move in moves:
+            from_sq,to_sq=move
+            fr,fc=notation_to_index(from_sq)
+            tr,tc=notation_to_index(to_sq)
+
+
+            new_board=make_move_copy(board,fr,fc,tr,tc)
+            score=quiescence(new_board,alpha,beta,True,depth+1)
+
+            if score<=alpha:
+                return alpha
+            if score<beta:
+                beta=score
+        return beta
+        
+
+def generate_capture_moves(board,color):
+    moves=[]
+    for from_row in range(8):
+        for from_col in range(8):
+            piece=board[from_row][from_col]
+
+            if piece==".":
+                continue
+            if color=="white" and piece.islower():
+                continue
+            if color=="black" and piece.isupper():
+                continue
+            for to_row in range(8):
+                for to_col in range(8):
+                    if board[to_row][to_col]==".":
+                        continue
+                    if not is_valid_move(board,from_row,from_col,to_row,to_col,piece):
+                        continue
+                    if move_puts_own_king_in_check(board,from_row,from_col,to_row,to_col,piece):
+                        continue
+                    moves.append((index_to_notation(from_row,from_col),index_to_notation(to_row,to_col)))
+    return moves
+
+
+
+########################################
 # MINIMAX SEARCH
 ########################################
 def minimax(board,depth,alpha,beta,maximizing_player):
     if depth==0:
-        return evaluate_board(board)
+        return quiescence(board,alpha,beta,maximizing_player)
     if maximizing_player:
         max_eval=-9999
         moves=generate_all_legal_moves(board,"white")
