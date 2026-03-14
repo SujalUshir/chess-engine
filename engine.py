@@ -11,6 +11,14 @@ board=[
     ["P","P","P","P","P","P","P","P"],
     ["R","N","B","Q","K","B","N","R"],
 ]
+PIECE_VALUE={
+"P":100,"N":320,"B":330,"R":500,"Q":900,"K":20000,"p":100,"n":320,"b":330,"r":500,"q":900,"k":20000
+}
+
+transposition_table = {}
+killer_moves=[[None,None] for _ in range(50)]
+
+
 ENGINE_DEPTH = 3
 current_turn="white"
 white_king_moved=False
@@ -29,6 +37,12 @@ en_passant_target=None
 ########################################
 def engine_move(board,depth):
     print(f"{current_turn} engine thinking...")
+    transposition_table.clear()
+
+    for d in range(50):
+        killer_moves[d][0]=None
+        killer_moves[d][1]=None
+
     best=iterative_deepening(board,depth)
     if best is None:
         print("Game over")
@@ -72,6 +86,9 @@ def human_vs_engine(board):
 ########################################
 # UTILITY FUNCTIONS
 ########################################
+def hash_board(board):
+    return tuple(tuple(row) for row in board)
+
 def copy_board(board):
     new_board=[]
     for row in board:
@@ -230,6 +247,10 @@ def evaluate_board(board):
 
             elif piece=="k":
                 score-=king_table[7-r][c]*10
+
+    white_moves=len(generate_all_legal_moves(board,"white"))
+    black_moves=len(generate_all_legal_moves(board,"black"))
+    score+=(white_moves-black_moves)*2
 
     return score
 ########################################
@@ -709,6 +730,7 @@ def quiescence(board,alpha,beta,maximizing_player,depth=0):
         if alpha<stand_pat:
             alpha=stand_pat
         moves=generate_capture_moves(board,"white")
+        moves=sorted(moves,key=lambda move: score_moves(board,move),reverse=True)
 
         for move in moves:
             from_sq,to_sq=move
@@ -729,6 +751,7 @@ def quiescence(board,alpha,beta,maximizing_player,depth=0):
         if beta>stand_pat:
             beta=stand_pat
         moves=generate_capture_moves(board,"black")
+        moves=sorted(moves,key=lambda move: score_moves(board,move),reverse=True)
 
         for move in moves:
             from_sq,to_sq=move
@@ -774,13 +797,40 @@ def generate_capture_moves(board,color):
 ########################################
 # MINIMAX SEARCH
 ########################################
+
+def score_moves(board,move):
+    from_sq,to_sq=move
+    fr,fc=notation_to_index(from_sq)
+    tr,tc=notation_to_index(to_sq)
+
+    piece=board[fr][fc]
+    target=board[tr][tc]
+
+    score=0
+
+    
+    if target!=".":
+        score+=10000+PIECE_VALUE[target]*10-PIECE_VALUE[piece]
+    if piece.upper()=="P":
+        if(piece.isupper() and tr==0) or (piece.islower() and tr==7):
+            score+=9000
+    if(tr,tc)==(3,3) or (tr,tc)==(3,4) or (tr,tc)==(4,3) or (tr,tc)==(4,4):
+        score+=50
+    return score
+    
 def minimax(board,depth,alpha,beta,maximizing_player):
+
+    board_key=(hash_board(board),depth,maximizing_player)
+    if board_key in transposition_table:
+        return transposition_table[board_key]
+    
     if depth==0:
         return quiescence(board,alpha,beta,maximizing_player)
     if maximizing_player:
         max_eval=-9999
         moves=generate_all_legal_moves(board,"white")
-        moves.sort(key=lambda move: is_capture_move(board,move),reverse=True)
+        moves=sorted(moves,key=lambda move:(move==killer_moves[depth][0],move==killer_moves[depth][1],score_moves(board,move)),reverse=True)
+
 
         for move in moves:
             from_sq,to_sq=move
@@ -793,12 +843,16 @@ def minimax(board,depth,alpha,beta,maximizing_player):
             alpha=max(alpha,eval)
 
             if beta<=alpha:
+                if not is_capture_move(board,move):
+                    killer_moves[depth][1]=killer_moves[depth][0]
+                    killer_moves[depth][0]=move                    
                 break
+        transposition_table[board_key]=max_eval
         return max_eval
     else:
         min_eval=9999
         moves=generate_all_legal_moves(board,"black")
-        moves.sort(key=lambda move: is_capture_move(board,move),reverse=True)
+        moves=sorted(moves,key=lambda move:(move==killer_moves[depth][0],move==killer_moves[depth][1],score_moves(board,move)),reverse=True)
         for move in moves:
             from_sq,to_sq=move
             fr,fc=notation_to_index(from_sq)
@@ -810,7 +864,11 @@ def minimax(board,depth,alpha,beta,maximizing_player):
             beta=min(beta,eval)
 
             if beta<=alpha:
+                if not is_capture_move(board,move):
+                    killer_moves[depth][1]=killer_moves[depth][0]
+                    killer_moves[depth][0]=move   
                 break
+        transposition_table[board_key] = min_eval
         return min_eval
     
 ########################################
@@ -827,7 +885,7 @@ def find_best_move(board,depth):
         best_eval=9999
 
     moves=generate_all_legal_moves(board,current_turn)
-    moves.sort(key=lambda move: is_capture_move(board,move),reverse=True)
+    moves=sorted(moves,key=lambda move:(move==killer_moves[depth][0],move==killer_moves[depth][1],score_moves(board,move)),reverse=True)
     for move in moves:
         from_sq,to_sq=move
         fr,fc=notation_to_index(from_sq)
