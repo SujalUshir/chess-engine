@@ -1,3 +1,5 @@
+import random
+
 ########################################
 # BOARD INITIALIZATION
 ########################################
@@ -14,6 +16,18 @@ board=[
 PIECE_VALUE={
 "P":100,"N":320,"B":330,"R":500,"Q":900,"K":20000,"p":100,"n":320,"b":330,"r":500,"q":900,"k":20000
 }
+pieces = ["P","N","B","R","Q","K","p","n","b","r","q","k"]
+
+zobrist_table = {}
+zobrist_turn = random.getrandbits(64)
+zobrist_enpassant = [random.getrandbits(64) for _ in range(8)]
+
+for piece in pieces:
+    zobrist_table[piece] = [random.getrandbits(64) for _ in range(64)]
+
+history_heuristic = {}
+
+principal_variation_move = None
 
 transposition_table = {}
 killer_moves=[[None,None] for _ in range(50)]
@@ -31,17 +45,15 @@ black_rook_a_moved=False
 black_rook_h_moved=False
 
 en_passant_target=None
+halfmove_clock = 0
+position_history = {}
 
 ########################################
 # ACTUAL GAME FUNCTIONS
 ########################################
 def engine_move(board,depth):
     print(f"{current_turn} engine thinking...")
-    transposition_table.clear()
 
-    for d in range(50):
-        killer_moves[d][0]=None
-        killer_moves[d][1]=None
 
     best=iterative_deepening(board,depth)
     if best is None:
@@ -86,8 +98,23 @@ def human_vs_engine(board):
 ########################################
 # UTILITY FUNCTIONS
 ########################################
-def hash_board(board):
-    return tuple(tuple(row) for row in board)
+def hash_board(board,turn):
+    h=0
+
+    if turn=="white":
+        h^=zobrist_turn
+    for r in range(8):
+        for c in range(8):
+            piece=board[r][c]
+
+            if piece!=".":
+                square=r*8+c
+                h^=zobrist_table[piece][square]
+
+    if en_passant_target:
+        row,col=en_passant_target
+        h ^= zobrist_enpassant[col]
+    return h
 
 def copy_board(board):
     new_board=[]
@@ -248,9 +275,6 @@ def evaluate_board(board):
             elif piece=="k":
                 score-=king_table[7-r][c]*10
 
-    white_moves=len(generate_all_legal_moves(board,"white"))
-    black_moves=len(generate_all_legal_moves(board,"black"))
-    score+=(white_moves-black_moves)*2
 
     return score
 ########################################
@@ -636,6 +660,7 @@ def move_piece(board,from_row,from_col,to_row,to_col):
 def move_piece_notation(board,from_square,to_square):
     global current_turn
     global en_passant_target
+    global halfmove_clock
    
     from_row,from_col=notation_to_index(from_square)
     to_row,to_col=notation_to_index(to_square)
@@ -663,8 +688,14 @@ def move_piece_notation(board,from_square,to_square):
     
     print(f"{current_turn}: {from_square} -> {to_square}")   
     previous_en_passant=en_passant_target
+    target_piece = board[to_row][to_col]
     move_piece(board,from_row,from_col,to_row,to_col)
     
+    if piece.upper()=="P" or target_piece!=".":
+        halfmove_clock = 0
+    else:
+        halfmove_clock += 1
+
     if piece.upper()=="P" and (to_row,to_col)==previous_en_passant:
         if piece.isupper():
             board[to_row+1][to_col]="."
@@ -706,8 +737,18 @@ def move_piece_notation(board,from_square,to_square):
             
 
     current_turn="black" if current_turn=="white" else "white"
+    hash_key = hash_board(board,current_turn)
+    position_history[hash_key] = position_history.get(hash_key,0) + 1
+    if position_history[hash_key] >= 3:
+        print_board(board)
+        print("Draw by threefold repetition!")
+        return
     if is_checkmate(board,current_turn):
         print(f"Checkmate! {'white' if current_turn=='black' else 'black'} wins!")
+        return
+    elif halfmove_clock >= 100:
+        print_board(board)
+        print("Draw by 50-move rule!")
         return
     elif is_stalemate(board,current_turn):
         print("Stalemate! Draw.")
@@ -722,16 +763,15 @@ def move_piece_notation(board,from_square,to_square):
 ########################################
 def quiescence(board,alpha,beta,maximizing_player,depth=0):
     stand_pat=evaluate_board(board)
-    if depth>=6:
+    if depth>=4:
         return stand_pat
     if maximizing_player:
         if stand_pat>=beta:
             return beta
         if alpha<stand_pat:
             alpha=stand_pat
-        moves=generate_capture_moves(board,"white")
-        moves=sorted(moves,key=lambda move: score_moves(board,move),reverse=True)
-
+        moves = generate_capture_moves(board,"white")
+        moves.sort(key=lambda m: score_moves(board,m), reverse=True)
         for move in moves:
             from_sq,to_sq=move
             fr,fc=notation_to_index(from_sq)
@@ -750,9 +790,8 @@ def quiescence(board,alpha,beta,maximizing_player,depth=0):
             return alpha
         if beta>stand_pat:
             beta=stand_pat
-        moves=generate_capture_moves(board,"black")
-        moves=sorted(moves,key=lambda move: score_moves(board,move),reverse=True)
-
+        moves = generate_capture_moves(board,"black")
+        moves.sort(key=lambda m: score_moves(board,m), reverse=True)
         for move in moves:
             from_sq,to_sq=move
             fr,fc=notation_to_index(from_sq)
@@ -797,7 +836,7 @@ def generate_capture_moves(board,color):
 ########################################
 # MINIMAX SEARCH
 ########################################
-
+piece_value = PIECE_VALUE
 def score_moves(board,move):
     from_sq,to_sq=move
     fr,fc=notation_to_index(from_sq)
@@ -810,7 +849,8 @@ def score_moves(board,move):
 
     
     if target!=".":
-        score+=10000+PIECE_VALUE[target]*10-PIECE_VALUE[piece]
+        score += 10000 + piece_value[target]*10 - piece_value[piece]
+    score += history_heuristic.get(move, 0)
     if piece.upper()=="P":
         if(piece.isupper() and tr==0) or (piece.islower() and tr==7):
             score+=9000
@@ -820,18 +860,23 @@ def score_moves(board,move):
     
 def minimax(board,depth,alpha,beta,maximizing_player):
 
-    board_key=(hash_board(board),depth,maximizing_player)
-    if board_key in transposition_table:
-        return transposition_table[board_key]
+    if len(transposition_table) > 200000:
+        transposition_table.clear()
+    turn = "white" if maximizing_player else "black"
+    board_key = hash_board(board,turn)
+
+    entry = transposition_table.get(board_key)
+    if entry:
+        stored_depth, stored_value = entry
+        if stored_depth>=depth:
+            return stored_value
     
     if depth==0:
         return quiescence(board,alpha,beta,maximizing_player)
     if maximizing_player:
         max_eval=-9999
         moves=generate_all_legal_moves(board,"white")
-        moves=sorted(moves,key=lambda move:(move==killer_moves[depth][0],move==killer_moves[depth][1],score_moves(board,move)),reverse=True)
-
-
+        moves.sort(key=lambda m: score_moves(board,m), reverse=True)        
         for move in moves:
             from_sq,to_sq=move
             fr,fc=notation_to_index(from_sq)
@@ -845,14 +890,15 @@ def minimax(board,depth,alpha,beta,maximizing_player):
             if beta<=alpha:
                 if not is_capture_move(board,move):
                     killer_moves[depth][1]=killer_moves[depth][0]
-                    killer_moves[depth][0]=move                    
+                    killer_moves[depth][0]=move   
+                    history_heuristic[move]=history_heuristic.get(move, 0)+depth*depth                 
                 break
-        transposition_table[board_key]=max_eval
+        transposition_table[board_key]=(depth,max_eval)
         return max_eval
     else:
         min_eval=9999
         moves=generate_all_legal_moves(board,"black")
-        moves=sorted(moves,key=lambda move:(move==killer_moves[depth][0],move==killer_moves[depth][1],score_moves(board,move)),reverse=True)
+        moves.sort(key=lambda m: score_moves(board,m), reverse=True)        
         for move in moves:
             from_sq,to_sq=move
             fr,fc=notation_to_index(from_sq)
@@ -867,8 +913,9 @@ def minimax(board,depth,alpha,beta,maximizing_player):
                 if not is_capture_move(board,move):
                     killer_moves[depth][1]=killer_moves[depth][0]
                     killer_moves[depth][0]=move   
+                    history_heuristic[move]=history_heuristic.get(move, 0)+depth*depth
                 break
-        transposition_table[board_key] = min_eval
+        transposition_table[board_key] =(depth,min_eval)
         return min_eval
     
 ########################################
@@ -885,7 +932,12 @@ def find_best_move(board,depth):
         best_eval=9999
 
     moves=generate_all_legal_moves(board,current_turn)
-    moves=sorted(moves,key=lambda move:(move==killer_moves[depth][0],move==killer_moves[depth][1],score_moves(board,move)),reverse=True)
+
+    if principal_variation_move and principal_variation_move in moves:
+        moves.remove(principal_variation_move)
+        moves.insert(0, principal_variation_move)
+
+    moves.sort(key=lambda m: score_moves(board,m), reverse=True)    
     for move in moves:
         from_sq,to_sq=move
         fr,fc=notation_to_index(from_sq)
@@ -907,6 +959,7 @@ def find_best_move(board,depth):
 
 
 def iterative_deepening(board,max_depth):
+    global principal_variation_move
     best_move=None
 
     for depth in range(1,max_depth+1):
@@ -915,6 +968,7 @@ def iterative_deepening(board,max_depth):
 
         if move is not None:
             best_move=move
+            principal_variation_move=move
             print("Best move at depth",depth,":",best_move)
     return best_move
 
@@ -925,6 +979,7 @@ def iterative_deepening(board,max_depth):
 ########################################
 
 if __name__ == "__main__":
+    position_history[hash_board(board,current_turn)] = 1
     # move_piece_notation(board,"e2","e4")
     # print_board(board)
 
