@@ -955,7 +955,7 @@ def find_best_move(board,depth):
             if eval<best_eval:
                 best_eval=eval
                 best_move=move
-    return best_move
+    return best_move, best_eval
 
 
 def iterative_deepening(board,max_depth):
@@ -964,13 +964,13 @@ def iterative_deepening(board,max_depth):
 
     for depth in range(1,max_depth+1):
         print(f"Searching depth {depth}...")
-        move=find_best_move(board,depth)
+        move, score = find_best_move(board, depth)
 
         if move is not None:
             best_move=move
             principal_variation_move=move
             print("Best move at depth",depth,":",best_move)
-    return best_move
+    return best_move,score
 
 
 
