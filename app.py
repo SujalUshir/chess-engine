@@ -1,0 +1,885 @@
+"""
+Chess Engine — Flask Backend
+python app.py
+"""
+import copy, traceback, os
+from flask import Flask, jsonify, request, render_template, send_from_directory
+import engine
+
+app = Flask(__name__)
+
+# ── Serve sounds from project-root sounds/ folder ─────────────────────────────
+@app.route('/sounds/<path:filename>')
+def serve_sound(filename):
+    sounds_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sounds')
+    return send_from_directory(sounds_dir, filename)
+
+# ── Stockfish init ─────────────────────────────────────────────────────────────
+_sf           = None
+STOCKFISH_OK  = False
+STOCKFISH_ERR = ""
+
+def _init_stockfish():
+    global _sf, STOCKFISH_OK, STOCKFISH_ERR
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates  = [
+        os.path.join(project_dir, 'stockfish.exe'),
+        os.path.join(project_dir, 'stockfish'),
+        r'stockfish.exe',
+        r'stockfish',
+    ]
+    for path in candidates:
+        if not os.path.exists(path) and path not in ('stockfish.exe', 'stockfish'):
+            continue
+        try:
+            from stockfish import Stockfish
+            sf = Stockfish(path=path)
+            sf.set_depth(12)
+            sf.set_fen_position("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+            move = sf.get_best_move()
+            if move:
+                _sf = sf
+                STOCKFISH_OK = True
+                print(f"[Stockfish] OK — path={path}, test move={move}")
+                return
+        except Exception as e:
+            STOCKFISH_ERR = str(e)
+            print(f"[Stockfish] failed path={path}: {e}")
+    print(f"[Stockfish] NOT available. Last error: {STOCKFISH_ERR}")
+
+_init_stockfish()
+
+# ── Undo / Redo stacks ────────────────────────────────────────────────────────
+# Each entry is a tuple: (board_snap, move_history_snapshot)
+# board_snap          — dict returned by _snap()
+# move_history_snapshot — deep copy of _move_history at that point
+_undo_stack = []
+_redo_stack = []
+
+# ── Move history ──────────────────────────────────────────────────────────────
+# Each entry stores everything needed for move review:
+#   move_number  : int   — half-move index (1-based)
+#   played       : str   — UCI string, e.g. "e2e4"
+#   snap         : dict  — board state BEFORE the move
+#   eval_before  : int|None  — Stockfish centipawn BEFORE move (white-positive)
+#   eval_after   : int|None  — Stockfish centipawn AFTER move  (white-positive)
+#   best_move    : str|None  — Stockfish's best move UCI in pre-move position
+#   best_eval    : int|None  — Stockfish eval AFTER the best move (white-positive)
+#   moving_color : str   — 'white' | 'black'
+_move_history = []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+def _snap():
+    return {
+        "board":              copy.deepcopy(engine.board),
+        "current_turn":       engine.current_turn,
+        "en_passant_target":  engine.en_passant_target,
+        "halfmove_clock":     engine.halfmove_clock,
+        "white_king_moved":   engine.white_king_moved,
+        "black_king_moved":   engine.black_king_moved,
+        "white_rook_a_moved": engine.white_rook_a_moved,
+        "white_rook_h_moved": engine.white_rook_h_moved,
+        "black_rook_a_moved": engine.black_rook_a_moved,
+        "black_rook_h_moved": engine.black_rook_h_moved,
+    }
+
+def _restore(s):
+    engine.board[:]            = s["board"]
+    engine.current_turn        = s["current_turn"]
+    engine.en_passant_target   = s["en_passant_target"]
+    engine.halfmove_clock      = s["halfmove_clock"]
+    engine.white_king_moved    = s["white_king_moved"]
+    engine.black_king_moved    = s["black_king_moved"]
+    engine.white_rook_a_moved  = s["white_rook_a_moved"]
+    engine.white_rook_h_moved  = s["white_rook_h_moved"]
+    engine.black_rook_a_moved  = s["black_rook_a_moved"]
+    engine.black_rook_h_moved  = s["black_rook_h_moved"]
+
+def _snap_full():
+    """Snapshot both board state and move history for full undo/redo."""
+    return (_snap(), copy.deepcopy(_move_history))
+
+def _restore_full(entry):
+    """Restore board state and move history from a full snapshot."""
+    board_snap, history_snap = entry
+    _restore(board_snap)
+    _move_history.clear()
+    _move_history.extend(history_snap)
+
+def _game_status():
+    turn = engine.current_turn
+    if engine.is_checkmate(engine.board, turn):
+        return {"status": "checkmate", "winner": "black" if turn == "white" else "white"}
+    if engine.is_stalemate(engine.board, turn):
+        return {"status": "stalemate", "winner": None}
+    if engine.halfmove_clock >= 100:
+        return {"status": "draw_50_move", "winner": None}
+    if _is_insufficient_material():
+        return {"status": "draw_material", "winner": None}
+    if any(v >= 3 for v in engine.position_history.values()):
+        return {"status": "draw_repetition", "winner": None}
+    if engine.is_king_in_check(engine.board, turn):
+        return {"status": "check", "winner": None}
+    return {"status": "ongoing", "winner": None}
+
+def _is_insufficient_material():
+    pieces = {}
+    for row in engine.board:
+        for cell in row:
+            if cell != '.':
+                pieces[cell] = pieces.get(cell, 0) + 1
+    white = {k: v for k, v in pieces.items() if k.isupper() and k != 'K'}
+    black = {k: v for k, v in pieces.items() if k.islower() and k != 'k'}
+    def only_minor(d):
+        total = sum(d.values())
+        if total == 0: return True
+        if total == 1 and ('N' in d or 'B' in d or 'n' in d or 'b' in d):
+            return True
+        return False
+    return only_minor(white) and only_minor(black)
+
+# Piece values for material counting (centipawns)
+_PIECE_VALUES = {
+    'P': 100, 'N': 320, 'B': 330, 'R': 500, 'Q': 900,
+    'p': 100, 'n': 320, 'b': 330, 'r': 500, 'q': 900,
+}
+
+def _material_score(board, color):
+    """
+    Total material value (centipawns) for the given color on the given board.
+    color: 'white' (uppercase pieces) or 'black' (lowercase pieces)
+    """
+    total = 0
+    for row in board:
+        for cell in row:
+            if cell == '.':
+                continue
+            if color == 'white' and cell.isupper() and cell != 'K':
+                total += _PIECE_VALUES.get(cell, 0)
+            elif color == 'black' and cell.islower() and cell != 'k':
+                total += _PIECE_VALUES.get(cell.upper(), 0)
+    return total
+
+def _engine_eval():
+    try:
+        return engine.evaluate_board(engine.board)
+    except Exception:
+        return 0
+
+def _fen():
+    rows = []
+    for row in engine.board:
+        e, s = 0, ""
+        for cell in row:
+            if cell == ".":
+                e += 1
+            else:
+                if e: s += str(e); e = 0
+                s += cell
+        if e: s += str(e)
+        rows.append(s)
+    t  = "w" if engine.current_turn == "white" else "b"
+    ca = ""
+    if not engine.white_king_moved:
+        if not engine.white_rook_h_moved: ca += "K"
+        if not engine.white_rook_a_moved: ca += "Q"
+    if not engine.black_king_moved:
+        if not engine.black_rook_h_moved: ca += "k"
+        if not engine.black_rook_a_moved: ca += "q"
+    ca = ca or "-"
+    ep = engine.index_to_notation(*engine.en_passant_target) \
+         if engine.en_passant_target else "-"
+    return f"{'/'.join(rows)} {t} {ca} {ep} {engine.halfmove_clock} 1"
+
+def _sf_eval_at_fen(fen_str):
+    """
+    Get Stockfish centipawn eval at a given FEN, always from WHITE's perspective.
+    Returns int or None if Stockfish not available.
+    """
+    if not STOCKFISH_OK or _sf is None:
+        return None
+    try:
+        _sf.set_fen_position(fen_str)
+        info = _sf.get_evaluation()
+        if not info:
+            return None
+        # Determine whose turn it is from FEN
+        side = fen_str.split()[1] if ' ' in fen_str else 'w'
+        if info["type"] == "cp":
+            cp = info["value"]
+            # stockfish-python returns eval from side-to-move perspective
+            if side == 'b':
+                cp = -cp
+            return cp
+        if info["type"] == "mate":
+            sign = 1 if info["value"] > 0 else -1
+            if side == 'b':
+                sign = -sign
+            return sign * 99999
+    except Exception as ex:
+        print(f"[SF eval_at_fen error] {ex}")
+    return None
+
+def _sf_eval():
+    """Return Stockfish eval for current global board position."""
+    return _sf_eval_at_fen(_fen())
+
+def _sf_best_move_and_eval(fen_str):
+    """
+    Ask Stockfish for the best move at the given FEN position.
+    Returns (best_move_uci, eval_after_best) where eval_after_best is
+    the Stockfish eval AFTER the best move is played (white-positive).
+    Returns (None, None) if unavailable.
+    """
+    if not STOCKFISH_OK or _sf is None:
+        return None, None
+    try:
+        _sf.set_fen_position(fen_str)
+        best_uci = _sf.get_best_move()
+        if not best_uci or len(best_uci) < 4:
+            return None, None
+
+        # Now get eval after playing best move — apply it and evaluate
+        # We do this by making a copy of the board state, applying the best move,
+        # then asking SF to evaluate the resulting position.
+        # The cleanest way is to use SF's own evaluation of the position after best move.
+        # We can do this by setting the position with the best move played.
+        try:
+            _sf.set_fen_position(fen_str)
+            # Use make_moves_from_current_position to apply the best move
+            _sf.make_moves_from_current_position([best_uci])
+            info = _sf.get_evaluation()
+            if info:
+                side = fen_str.split()[1] if ' ' in fen_str else 'w'
+                # After best move, it's the opponent's turn — SF eval is from their view
+                # We want white-positive, so negate if side was white (now black to move after)
+                # More precisely: after white's best move, black to move → SF gives black's view → negate
+                if info["type"] == "cp":
+                    cp = info["value"]
+                    # The position after best move: opponent is now to move
+                    # SF returns eval from the NEW side-to-move perspective
+                    # opponent of original side:
+                    if side == 'w':
+                        cp = -cp   # white moved, black to move → SF gives black's cp → negate for white-positive
+                    # if side == 'b': black moved, white to move → SF gives white's cp → keep as is
+                    best_eval = cp
+                elif info["type"] == "mate":
+                    sign = 1 if info["value"] > 0 else -1
+                    if side == 'w':
+                        sign = -sign
+                    best_eval = sign * 99999
+                else:
+                    best_eval = None
+            else:
+                best_eval = None
+        except Exception:
+            best_eval = None
+
+        return best_uci[:4], best_eval
+    except Exception as ex:
+        print(f"[SF best_move_and_eval error] {ex}")
+    return None, None
+
+def _sf_best_move_from_fen(fen_str):
+    """Ask Stockfish for best move given a FEN string. Returns UCI string or None."""
+    if not STOCKFISH_OK or _sf is None:
+        return None
+    try:
+        _sf.set_fen_position(fen_str)
+        uci = _sf.get_best_move()
+        if uci and len(uci) >= 4:
+            return uci[:4]
+    except Exception as ex:
+        print(f"[sf_best_move_from_fen error] {ex}")
+    return None
+
+def _classify_move(eval_before, best_eval, eval_after, moving_color, sacrificed_material=0):
+    """
+    Classify a move using delta = best_val - played_val (from moving player's view).
+
+    eval_before         : SF eval BEFORE the move (white-positive centipawns)
+    best_eval           : SF eval AFTER the best move (white-positive centipawns)
+    eval_after          : SF eval AFTER the played move (white-positive centipawns)
+    moving_color        : 'white' | 'black'
+    sacrificed_material : centipawns of own material lost in this move (>0 = sacrifice)
+
+    Classification order (highest priority first):
+      Brilliant  — sacrificed own material AND delta <= 30 cp from best
+      Best       — 0–20 cp worse than best
+      Excellent  — 20–50 cp
+      Good       — 50–100 cp
+      Inaccuracy — 100–200 cp
+      Mistake    — 200–400 cp
+      Blunder    — 400+ cp
+    """
+    if best_eval is None or eval_after is None:
+        return None
+
+    # Convert to moving-player-positive perspective
+    if moving_color == 'white':
+        played_val = eval_after
+        best_val   = best_eval
+    else:
+        played_val = -eval_after
+        best_val   = -best_eval
+
+    # delta: how much worse the played move is vs the best move
+    # delta <= 0 means the played move was AT LEAST as good as Stockfish's best
+    delta = best_val - played_val
+
+    # ── Brilliant: sacrificed own material AND very close to best move ──
+    if sacrificed_material > 0 and delta <= 30:
+        return "Brilliant"
+
+    if delta <= 20:
+        return "Best"
+    if delta <= 50:
+        return "Excellent"
+    if delta <= 100:
+        return "Good"
+    if delta <= 200:
+        return "Inaccuracy"
+    if delta <= 400:
+        return "Mistake"
+    return "Blunder"
+
+def _is_book_move(move_number, eval_before):
+    """
+    Heuristic: first 10 half-moves with near-equal eval (±30 cp) are book moves.
+    """
+    if eval_before is None:
+        return False
+    return move_number <= 10 and abs(eval_before) <= 30
+
+def _payload(with_sf=False):
+    eng_eval = _engine_eval()
+    sf_eval  = _sf_eval() if with_sf else None
+    return {
+        "board":          engine.board,
+        "current_turn":   engine.current_turn,
+        "eval_engine":    eng_eval,
+        "eval_sf":        sf_eval,
+        "can_undo":       len(_undo_stack) > 0,
+        "can_redo":       len(_redo_stack) > 0,
+        "stockfish_ok":   STOCKFISH_OK,
+        **_game_status(),
+    }
+
+def _reset_globals():
+    engine.board[:] = [
+        ["r","n","b","q","k","b","n","r"],
+        ["p","p","p","p","p","p","p","p"],
+        [".",".",".",".",".",".",".","."],
+        [".",".",".",".",".",".",".","."],
+        [".",".",".",".",".",".",".","."],
+        [".",".",".",".",".",".",".","."],
+        ["P","P","P","P","P","P","P","P"],
+        ["R","N","B","Q","K","B","N","R"],
+    ]
+    engine.current_turn        = "white"
+    engine.white_king_moved    = False
+    engine.black_king_moved    = False
+    engine.white_rook_a_moved  = False
+    engine.white_rook_h_moved  = False
+    engine.black_rook_a_moved  = False
+    engine.black_rook_h_moved  = False
+    engine.en_passant_target   = None
+    engine.halfmove_clock      = 0
+    engine.position_history.clear()
+    engine.transposition_table.clear()
+    engine.history_heuristic.clear()
+    engine.principal_variation_move = None
+    engine.killer_moves = [[None, None] for _ in range(50)]
+    engine.position_history[engine.hash_board(engine.board, engine.current_turn)] = 1
+
+def _best_move_from_snap(s):
+    """Temporarily restore snap, run engine search, restore back."""
+    saved = _snap()
+    _restore(s)
+    try:
+        moves = engine.generate_all_legal_moves(engine.board, engine.current_turn)
+        if not moves:
+            return None
+        result = engine.iterative_deepening(engine.board, engine.ENGINE_DEPTH)
+        if not result or not result[0]:
+            return None
+        best, _ = result
+        return best[0] + best[1]
+    except Exception as ex:
+        print(f"[best_move_from_snap error] {ex}")
+        return None
+    finally:
+        _restore(saved)
+
+def _build_move_review_entry(pre_snap, played_uci, move_number):
+    """
+    Given the pre-move snapshot and what was played, compute all review fields.
+    Returns a dict ready to be stored in _move_history and returned to client.
+    Fully restores global state after computation.
+    """
+    saved = _snap()
+    try:
+        _restore(pre_snap)
+        fen_before     = _fen()
+        moving_color   = engine.current_turn
+        eval_before    = _sf_eval_at_fen(fen_before)
+        best_uci, best_eval = _sf_best_move_and_eval(fen_before)
+
+        # ── Material tracking for Brilliant detection ──
+        # Record own material BEFORE the move
+        own_material_before = _material_score(engine.board, moving_color)
+
+        # Apply the played move to measure material afterwards
+        engine.move_piece_notation(engine.board, played_uci[:2], played_uci[2:4])
+
+        # Own material AFTER the move (may have lost pieces in a sacrifice)
+        own_material_after = _material_score(engine.board, moving_color)
+
+        # sacrificed_material > 0 means the player gave up their own material
+        sacrificed_material = max(0, own_material_before - own_material_after)
+
+        eval_after = _sf_eval_at_fen(_fen())
+
+        classification = _classify_move(
+            eval_before, best_eval, eval_after,
+            moving_color, sacrificed_material
+        )
+
+        # Override with Book Move if applicable (Book takes lowest priority —
+        # only applies if not already Brilliant/Best)
+        if classification not in ("Brilliant", "Best") and _is_book_move(move_number, eval_before):
+            classification = "Book"
+
+        return {
+            "move_number":        move_number,
+            "played":             played_uci,
+            "best":               best_uci,
+            "eval_before":        round(eval_before / 100, 2) if eval_before is not None else None,
+            "eval_after":         round(eval_after  / 100, 2) if eval_after  is not None else None,
+            "best_eval":          round(best_eval   / 100, 2) if best_eval   is not None else None,
+            "classification":     classification,
+            "moving_color":       moving_color,
+            "sacrificed_material": sacrificed_material,
+            # Raw centipawns stored for frontend classification logic
+            "eval_before_cp":     eval_before,
+            "eval_after_cp":      eval_after,
+            "best_eval_cp":       best_eval,
+        }
+    except Exception as ex:
+        print(f"[build_move_review_entry error] {ex}")
+        return {
+            "move_number":        move_number,
+            "played":             played_uci,
+            "best":               None,
+            "eval_before":        None,
+            "eval_after":         None,
+            "best_eval":          None,
+            "classification":     None,
+            "moving_color":       engine.current_turn,
+            "sacrificed_material": 0,
+            "eval_before_cp":     None,
+            "eval_after_cp":      None,
+            "best_eval_cp":       None,
+        }
+    finally:
+        _restore(saved)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ROUTES
+# ─────────────────────────────────────────────────────────────────────────────
+@app.route("/")
+def home():
+    return render_template("index.html")
+
+@app.get("/state")
+def get_state():
+    return jsonify(_payload(with_sf=False))
+
+@app.get("/eval")
+def get_eval():
+    """Dedicated eval endpoint — called after undo/redo to refresh both bars."""
+    return jsonify({
+        "eval_engine": _engine_eval(),
+        "eval_sf":     _sf_eval(),
+    })
+
+@app.get("/moves")
+def legal_moves():
+    sq    = request.args.get("square")
+    moves = engine.generate_all_legal_moves(engine.board, engine.current_turn)
+    if sq:
+        moves = [m for m in moves if m[0] == sq]
+    return jsonify({
+        "turn":  engine.current_turn,
+        "moves": [{"from": f, "to": t} for f, t in moves],
+    })
+
+@app.get("/fen")
+def get_fen():
+    return jsonify({"fen": _fen()})
+
+@app.get("/best_move")
+def best_move_hint():
+    """Return best move for current position (board highlight feature)."""
+    try:
+        moves = engine.generate_all_legal_moves(engine.board, engine.current_turn)
+        if not moves:
+            return jsonify({"error": "no legal moves"}), 400
+        result = engine.iterative_deepening(engine.board, engine.ENGINE_DEPTH)
+        if not result:
+            return jsonify({"error": "no move found"}), 500
+        best, score = result
+        return jsonify({"from": best[0], "to": best[1], "score": score})
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
+
+# ── Best Move Display endpoints ───────────────────────────────────────────────
+
+@app.get("/bestmove/current")
+def bestmove_current():
+    """Return best move for current position from both engines."""
+    try:
+        moves = engine.generate_all_legal_moves(engine.board, engine.current_turn)
+        if not moves:
+            return jsonify({"engine": None, "stockfish": None})
+
+        eng_best = None
+        try:
+            result = engine.iterative_deepening(engine.board, engine.ENGINE_DEPTH)
+            if result and result[0]:
+                eng_best = result[0][0] + result[0][1]
+        except Exception as ex:
+            print(f"[bestmove/current engine error] {ex}")
+
+        sf_best = _sf_best_move_from_fen(_fen())
+        return jsonify({"engine": eng_best, "stockfish": sf_best})
+    except Exception as ex:
+        traceback.print_exc()
+        return jsonify({"error": str(ex)}), 500
+
+@app.get("/bestmove/played")
+def bestmove_played():
+    """Return best move for the position BEFORE the last played move."""
+    try:
+        if not _move_history:
+            return jsonify({
+                "played": None, "best_engine": None,
+                "best_sf": None, "move_number": 0
+            })
+        last    = _move_history[-1]
+        snap    = last["snap"]
+        played  = last["played"]
+        move_no = last["move_number"]
+
+        best_eng = _best_move_from_snap(snap)
+        saved = _snap()
+        _restore(snap)
+        fen_before = _fen()
+        _restore(saved)
+        best_sf = _sf_best_move_from_fen(fen_before)
+
+        return jsonify({
+            "played":      played,
+            "best_engine": best_eng,
+            "best_sf":     best_sf,
+            "move_number": move_no,
+        })
+    except Exception as ex:
+        traceback.print_exc()
+        return jsonify({"error": str(ex)}), 500
+
+# ── Move review endpoint ──────────────────────────────────────────────────────
+
+@app.get("/review")
+def get_review():
+    """
+    Return full move review for all played moves (or last N if ?n= given).
+    Each entry:
+    {
+      "move_number":    1,
+      "played":        "e2e4",
+      "best":          "d2d4",
+      "eval_before":    0.10,   # in pawns, white-positive
+      "eval_after":    -0.15,
+      "best_eval":      0.10,
+      "classification": "Excellent",
+      "moving_color":  "white"
+    }
+    Uses stored review data collected during the game (fast, no replay).
+    Falls back to on-demand computation if data missing.
+    """
+    try:
+        n_param = request.args.get("n")
+        entries = _move_history if not n_param else _move_history[-int(n_param):]
+
+        results = []
+        for entry in entries:
+            results.append({
+                "move_number":    entry["move_number"],
+                "played":         entry["played"],
+                "best":           entry.get("best"),
+                "eval_before":    entry.get("eval_before"),
+                "eval_after":     entry.get("eval_after"),
+                "best_eval":      entry.get("best_eval"),
+                "classification": entry.get("classification"),
+                "moving_color":   entry.get("moving_color", "white"),
+            })
+        return jsonify(results)
+    except Exception as ex:
+        traceback.print_exc()
+        return jsonify({"error": str(ex)}), 500
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MOVE ENDPOINTS
+# Each move endpoint now:
+#  1. Records pre-move snapshot
+#  2. Computes full review data (eval_before, best_move, best_eval, eval_after, classification)
+#  3. Returns review fields in the payload for immediate frontend use
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/move/human")
+def human_move():
+    d  = request.get_json(force=True)
+    fr = d.get("from", "")
+    to = d.get("to",   "")
+    if not fr or not to:
+        return jsonify({"error": "need from+to"}), 400
+
+    r1, c1 = engine.notation_to_index(fr)
+    piece  = engine.board[r1][c1]
+    if piece == ".":
+        return jsonify({"error": "no piece on source square"}), 400
+    if engine.current_turn == "white" and piece.islower():
+        return jsonify({"error": "it is white's turn"}), 400
+    if engine.current_turn == "black" and piece.isupper():
+        return jsonify({"error": "it is black's turn"}), 400
+    r2, c2 = engine.notation_to_index(to)
+    if not engine.is_valid_move(engine.board, r1, c1, r2, c2, piece):
+        return jsonify({"error": "invalid move"}), 400
+    if engine.move_puts_own_king_in_check(engine.board, r1, c1, r2, c2, piece):
+        return jsonify({"error": "move leaves king in check"}), 400
+
+    pre_snap    = _snap()
+    move_number = len(_move_history) + 1
+    played_uci  = fr + to
+
+    # Compute review data BEFORE making the move on the global board
+    # (includes eval_before, best_move, best_eval from pre-move FEN,
+    #  and eval_after by temporarily applying the move)
+    review = _build_move_review_entry(pre_snap, played_uci, move_number)
+
+    # Now actually make the move
+    _undo_stack.append(_snap_full())
+    _redo_stack.clear()
+    engine.move_piece_notation(engine.board, fr, to)
+
+    # Store in history (include snap for undo and bestmove/played endpoint)
+    history_entry = dict(review)
+    history_entry["snap"] = pre_snap
+    _move_history.append(history_entry)
+
+    payload = _payload(with_sf=True)
+    # eval_before_sf / eval_after_sf kept for backward compat with board.js
+    payload["eval_before_sf"]   = review["eval_before_cp"]
+    payload["eval_before_engine"] = _engine_eval()   # already applied
+    payload["move_from"]        = fr
+    payload["move_to"]          = to
+    # New review fields
+    payload["review"]           = {
+        "move":           played_uci,
+        "best":           review["best"],
+        "eval_before":    review["eval_before"],
+        "eval_after":     review["eval_after"],
+        "best_eval":      review["best_eval"],
+        "classification": review["classification"],
+        "moving_color":   review["moving_color"],
+        # raw cp values for frontend classification logic
+        "eval_before_cp": review["eval_before_cp"],
+        "eval_after_cp":  review["eval_after_cp"],
+        "best_eval_cp":   review["best_eval_cp"],
+    }
+    return jsonify(payload)
+
+@app.post("/move/engine")
+def engine_move():
+    d     = request.get_json(force=True, silent=True) or {}
+    depth = int(d.get("depth", engine.ENGINE_DEPTH))
+    moves = engine.generate_all_legal_moves(engine.board, engine.current_turn)
+    if not moves:
+        return jsonify({"error": "no legal moves"}), 400
+
+    result = engine.iterative_deepening(engine.board, depth)
+    if not result:
+        return jsonify({"error": "engine found no move"}), 500
+    best, _ = result
+    fr, to  = best
+    played_uci  = fr + to
+
+    pre_snap    = _snap()
+    move_number = len(_move_history) + 1
+
+    review = _build_move_review_entry(pre_snap, played_uci, move_number)
+
+    _undo_stack.append(_snap_full())
+    _redo_stack.clear()
+    engine.move_piece_notation(engine.board, fr, to)
+
+    history_entry = dict(review)
+    history_entry["snap"] = pre_snap
+    _move_history.append(history_entry)
+
+    payload = {"engine_move": {"from": fr, "to": to}, **_payload(with_sf=True)}
+    payload["eval_before_sf"]     = review["eval_before_cp"]
+    payload["eval_before_engine"] = _engine_eval()
+    payload["move_from"]          = fr
+    payload["move_to"]            = to
+    payload["review"]             = {
+        "move":           played_uci,
+        "best":           review["best"],
+        "eval_before":    review["eval_before"],
+        "eval_after":     review["eval_after"],
+        "best_eval":      review["best_eval"],
+        "classification": review["classification"],
+        "moving_color":   review["moving_color"],
+        "eval_before_cp": review["eval_before_cp"],
+        "eval_after_cp":  review["eval_after_cp"],
+        "best_eval_cp":   review["best_eval_cp"],
+    }
+    return jsonify(payload)
+
+@app.post("/move/stockfish")
+def sf_move():
+    if not STOCKFISH_OK or _sf is None:
+        return jsonify({"error": f"Stockfish not available: {STOCKFISH_ERR}"}), 501
+    moves = engine.generate_all_legal_moves(engine.board, engine.current_turn)
+    if not moves:
+        return jsonify({"error": "no legal moves"}), 400
+    try:
+        fen_str = _fen()
+        _sf.set_fen_position(fen_str)
+        uci = _sf.get_best_move()
+        if not uci or len(uci) < 4:
+            return jsonify({"error": "Stockfish returned no move"}), 500
+        fr = uci[0:2]
+        to = uci[2:4]
+        r1, c1 = engine.notation_to_index(fr)
+        r2, c2 = engine.notation_to_index(to)
+        piece  = engine.board[r1][c1]
+        if piece == ".":
+            return jsonify({"error": f"Stockfish picked empty square {fr}"}), 500
+
+        played_uci  = fr + to
+        pre_snap    = _snap()
+        move_number = len(_move_history) + 1
+
+        review = _build_move_review_entry(pre_snap, played_uci, move_number)
+
+        _undo_stack.append(_snap_full())
+        _redo_stack.clear()
+        engine.move_piece_notation(engine.board, fr, to)
+        if len(uci) == 5:
+            promo = uci[4].upper()
+            engine.board[r2][c2] = promo if engine.current_turn == "black" else promo.lower()
+
+        history_entry = dict(review)
+        history_entry["snap"] = pre_snap
+        _move_history.append(history_entry)
+
+        payload = {"engine_move": {"from": fr, "to": to}, **_payload(with_sf=True)}
+        payload["eval_before_sf"]     = review["eval_before_cp"]
+        payload["eval_before_engine"] = _engine_eval()
+        payload["move_from"]          = fr
+        payload["move_to"]            = to
+        payload["review"]             = {
+            "move":           played_uci,
+            "best":           review["best"],
+            "eval_before":    review["eval_before"],
+            "eval_after":     review["eval_after"],
+            "best_eval":      review["best_eval"],
+            "classification": review["classification"],
+            "moving_color":   review["moving_color"],
+            "eval_before_cp": review["eval_before_cp"],
+            "eval_after_cp":  review["eval_after_cp"],
+            "best_eval_cp":   review["best_eval_cp"],
+        }
+        return jsonify(payload)
+    except Exception as ex:
+        print(f"[SF move error]\n{traceback.format_exc()}")
+        return jsonify({"error": f"Stockfish error: {str(ex)}"}), 500
+
+
+def _history_for_client():
+    return [
+        {
+            'move':           e.get('played'),
+            'best':           e.get('best'),
+            'eval_before':    e.get('eval_before'),
+            'eval_after':     e.get('eval_after'),
+            'best_eval':      e.get('best_eval'),
+            'classification': e.get('classification'),
+            'moving_color':   e.get('moving_color', 'white'),
+            'eval_before_cp': e.get('eval_before_cp'),
+            'eval_after_cp':  e.get('eval_after_cp'),
+            'best_eval_cp':   e.get('best_eval_cp'),
+        }
+        for e in _move_history
+    ]
+
+@app.post("/undo")
+def undo():
+    if not _undo_stack:
+        return jsonify({"error": "nothing to undo"}), 400
+    _redo_stack.append(_snap_full())
+    _restore_full(_undo_stack.pop())
+    payload = _payload(with_sf=False)
+    payload["move_history"] = _history_for_client()
+    return jsonify(payload)
+
+@app.post("/redo")
+def redo():
+    if not _redo_stack:
+        return jsonify({"error": "nothing to redo"}), 400
+    _undo_stack.append(_snap_full())
+    _restore_full(_redo_stack.pop())
+    payload = _payload(with_sf=False)
+    payload["move_history"] = _history_for_client()
+    return jsonify(payload)
+
+@app.post("/reset")
+def reset():
+    _reset_globals()
+    _undo_stack.clear()
+    _redo_stack.clear()
+    _move_history.clear()
+    return jsonify(_payload(with_sf=False))
+
+@app.get("/debug")
+def debug():
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    sounds_dir  = os.path.join(project_dir, 'sounds')
+    static_sounds_dir = os.path.join(project_dir, 'static', 'sounds')
+    return jsonify({
+        "stockfish_ok":      STOCKFISH_OK,
+        "stockfish_error":   STOCKFISH_ERR,
+        "cwd":               os.getcwd(),
+        "project_dir":       project_dir,
+        "files_in_cwd":      os.listdir("."),
+        "move_history_len":  len(_move_history),
+        "sounds_at_root":    {
+            "dir_exists":  os.path.isdir(sounds_dir),
+            "move.wav":    os.path.exists(os.path.join(sounds_dir, "move.wav")),
+            "capture.wav": os.path.exists(os.path.join(sounds_dir, "capture.wav")),
+            "check.wav":   os.path.exists(os.path.join(sounds_dir, "check.wav")),
+        },
+        "sounds_in_static":  {
+            "dir_exists":  os.path.isdir(static_sounds_dir),
+            "move.wav":    os.path.exists(os.path.join(static_sounds_dir, "move.wav")),
+            "capture.wav": os.path.exists(os.path.join(static_sounds_dir, "capture.wav")),
+            "check.wav":   os.path.exists(os.path.join(static_sounds_dir, "check.wav")),
+        },
+    })
+
+if __name__ == "__main__":
+    app.run(debug=True)
