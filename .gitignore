@@ -5,3 +5,4 @@ stockfish*
 .vscode/
 stockfish*
 *.exe
+*.json

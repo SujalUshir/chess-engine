@@ -69,6 +69,9 @@ const App = (() => {
 
     // Tell Board the new depth, then do a full reset
     Board.setEngineDepth(newBot?.depth || 3);
+    // Clear best-move hints before reset so stale highlights don't flash
+    Board.setBestMoveMode('none');
+    Board.setBestMoveMode(cfg.bmMode);
     _showToast(`Difficulty → ${newBot?.name || 'Default'} · New game started`);
     await Board.resetGame();
   }
@@ -108,6 +111,9 @@ const App = (() => {
     }
 
     Board.setEngineDepth(selectedBot?.depth || 3);
+    // Clear best-move hints before reset so stale highlights don't flash
+    Board.setBestMoveMode('none');
+    Board.setBestMoveMode(cfg.bmMode);
     _showToast(`Mode → ${MODE_LABELS[newMode]||newMode} · New game started`);
     await Board.resetGame();
   }
@@ -605,6 +611,7 @@ const App = (() => {
 
   function navigate(toPage,color){
     const leaving=location.hash.slice(1)||'home';
+    // Reset when leaving game (clean up)
     if(leaving==='game'&&toPage!=='game'){
       fetch('/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{});
     }

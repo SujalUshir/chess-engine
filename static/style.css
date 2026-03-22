@@ -597,6 +597,7 @@ nav {
 
 /* Classification symbol */
 .move-sym      { font-size: .64rem; font-weight: 700; line-height: 1; margin-left: 2px; }
+.cl-brilliant  { color: #00c853; }
 .cl-book       { color: #aaaaaa; }
 .cl-best       { color: #22dd88; }
 .cl-excellent  { color: #66cc66; }
@@ -984,3 +985,126 @@ nav {
   white-space: nowrap;
   text-align: center;
 }
+
+/* ═══════════════════════════════════════════
+   POST-GAME SUMMARY  (accuracy + eval graph)
+═══════════════════════════════════════════ */
+
+/* Widen modal to fit graph */
+.end-modal { max-width: 380px; padding: 32px 36px; }
+/* Reduce bottom margin on subtitle so accuracy sits close */
+.end-modal-sub { margin-bottom: 14px; }
+
+/* Accuracy row */
+.pg-accuracy-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.pg-acc-label {
+  font-size: .65rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.pg-acc-value {
+  font-family: var(--font-display);
+  font-size: 2rem;
+  font-weight: 900;
+  color: var(--accent-lt);
+  line-height: 1;
+}
+
+/* Counter row: blunders / mistakes / inaccuracies */
+.pg-counters {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+.pg-counter {
+  font-family: var(--font-mono);
+  font-size: .72rem;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(255,255,255,.04);
+  border: 1px solid var(--border);
+}
+.pg-brilliant   { color: #00c853; border-color: #00c85344; }
+.pg-blunder     { color: #ee3333; border-color: #ee333344; }
+.pg-mistake     { color: #ee8833; border-color: #ee883344; }
+.pg-inaccuracy  { color: #ddbb22; border-color: #ddbb2244; }
+
+/* ═══════════════════════════════════════════
+   POST-GAME: PER-SIDE (WHITE / BLACK) SUMMARY
+═══════════════════════════════════════════ */
+
+/* Widen modal further to fit the two-column layout */
+.end-modal { max-width: 420px; }
+
+/* Two-column container */
+.pg-sides {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 12px 0 6px;
+}
+
+/* Individual side block */
+.pg-side-block {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  text-align: center;
+  background: rgba(255,255,255,.03);
+}
+.pg-side-white { border-color: rgba(255,255,255,.18); }
+.pg-side-black { border-color: rgba(80,80,80,.5); }
+
+/* Side heading e.g. "♙ White" */
+.pg-side-header {
+  font-size: .6rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+/* Big accuracy number */
+.pg-side-accuracy {
+  font-family: var(--font-display);
+  font-size: 1.65rem;
+  font-weight: 900;
+  line-height: 1;
+  margin-bottom: 6px;
+}
+/* Colour coding */
+.acc-high { color: #22dd88; }  /* ≥ 80 % — green */
+.acc-mid  { color: #c8a96e; }  /* 55–79 % — amber */
+.acc-low  { color: #ee5533; }  /* < 55 % — red   */
+
+/* Small counter pills inside a side block */
+.pg-side-counters {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px;
+}
+.pg-sc {
+  font-family: var(--font-mono);
+  font-size: .65rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(255,255,255,.04);
+  border: 1px solid var(--border);
+}
+/* Reuse existing colour tokens */
+.pg-sc.pg-brilliant   { color: #00c853; border-color: #00c85344; }
+.pg-sc.pg-blunder     { color: #ee3333; border-color: #ee333344; }
+.pg-sc.pg-mistake     { color: #ee8833; border-color: #ee883344; }
+.pg-sc.pg-inaccuracy  { color: #ddbb22; border-color: #ddbb2244; }

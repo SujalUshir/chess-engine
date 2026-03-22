@@ -855,6 +855,148 @@ def reset():
     _move_history.clear()
     return jsonify(_payload(with_sf=False))
 
+
+# ── New endpoints: eval_history, accuracy, save_game ──────────────────────────
+
+@app.get("/eval_history")
+def eval_history():
+    """
+    Return eval_after (in pawns, white-positive) for every played move.
+    Used by the frontend eval graph.  [ 0.10, -0.15, 0.42, ... ]
+    """
+    return jsonify([
+        round(e["eval_after"], 2) if e.get("eval_after") is not None else None
+        for e in _move_history
+    ])
+
+
+def _compute_side_stats(moves):
+    """
+    Given a list of move-history entries for one side, return accuracy stats.
+    Used by /accuracy to compute per-color breakdowns.
+    """
+    scores       = []
+    blunders     = 0
+    mistakes     = 0
+    inaccuracies = 0
+    brilliants   = 0
+
+    for e in moves:
+        cl = e.get("classification")
+        if   cl == "Blunder":    blunders     += 1
+        elif cl == "Mistake":    mistakes     += 1
+        elif cl == "Inaccuracy": inaccuracies += 1
+        elif cl == "Brilliant":  brilliants   += 1
+
+        b     = e.get("best_eval_cp")
+        a     = e.get("eval_after_cp")
+        color = e.get("moving_color", "white")
+        if b is not None and a is not None:
+            sign  = 1 if color == "white" else -1
+            delta = max(0, sign * (b - a))
+            scores.append(max(0.0, 100.0 - delta / 10.0))
+
+    accuracy = round(sum(scores) / len(scores)) if scores else 100
+    return {
+        "accuracy":     accuracy,
+        "blunders":     blunders,
+        "mistakes":     mistakes,
+        "inaccuracies": inaccuracies,
+        "brilliants":   brilliants,
+        "moves_scored": len(scores),
+    }
+
+
+@app.get("/accuracy")
+def get_accuracy():
+    """
+    Compute accuracy stats for the current game — overall and per side.
+    score_per_move = max(0, 100 - abs(best_eval_cp - eval_after_cp) / 10)
+    accuracy       = average of all move scores  (0–100, integer)
+
+    Returns both a flat overall block (backward-compatible) and
+    a 'white' / 'black' breakdown keyed by color.
+    """
+    # Split history by color using moving_color field
+    # (more reliable than even/odd index because undo/redo can shift parity)
+    white_moves = [e for e in _move_history if e.get("moving_color", "white") == "white"]
+    black_moves = [e for e in _move_history if e.get("moving_color", "white") == "black"]
+
+    overall = _compute_side_stats(_move_history)
+    white   = _compute_side_stats(white_moves)
+    black   = _compute_side_stats(black_moves)
+
+    return jsonify({
+        # ── backward-compatible flat keys ──
+        "accuracy":     overall["accuracy"],
+        "blunders":     overall["blunders"],
+        "mistakes":     overall["mistakes"],
+        "inaccuracies": overall["inaccuracies"],
+        "brilliants":   overall["brilliants"],
+        "moves_scored": overall["moves_scored"],
+        # ── per-side breakdown ──
+        "white": white,
+        "black": black,
+    })
+
+
+@app.post("/save_game")
+def save_game():
+    """
+    Append a completed game to saved_games.json (never overwrites).
+    Body: { "moves": [...], "result": "1-0"|"0-1"|"1/2-1/2",
+            "accuracy": {...}, "date": "..." }
+    """
+    import json as _json, datetime as _dt
+
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+
+        record = {
+            "date":     body.get("date") or _dt.datetime.utcnow().isoformat() + "Z",
+            "result":   body.get("result", "?"),
+            "moves":    body.get("moves", []),
+            "accuracy": body.get("accuracy", {}),
+            # Server-side full review (more detail than the client sends)
+            "review": [
+                {
+                    "move":           e.get("played"),
+                    "best":           e.get("best"),
+                    "eval_before":    e.get("eval_before"),
+                    "eval_after":     e.get("eval_after"),
+                    "best_eval":      e.get("best_eval"),
+                    "classification": e.get("classification"),
+                    "moving_color":   e.get("moving_color"),
+                }
+                for e in _move_history
+            ],
+        }
+
+        save_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "saved_games.json"
+        )
+
+        games = []
+        if os.path.exists(save_path):
+            try:
+                with open(save_path, "r", encoding="utf-8") as f:
+                    games = _json.load(f)
+                if not isinstance(games, list):
+                    games = []
+            except Exception:
+                games = []
+
+        games.append(record)
+
+        with open(save_path, "w", encoding="utf-8") as f:
+            _json.dump(games, f, indent=2, ensure_ascii=False)
+
+        return jsonify({"saved": True, "total_games": len(games)})
+
+    except Exception as ex:
+        traceback.print_exc()
+        return jsonify({"error": str(ex)}), 500
+
 @app.get("/debug")
 def debug():
     project_dir = os.path.dirname(os.path.abspath(__file__))

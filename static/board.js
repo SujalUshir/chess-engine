@@ -61,6 +61,7 @@ const Board = (() => {
        (Book move overrides all if server says so)
   ════════════════════════════════════════════ */
   const CLASS = {
+    BRILLIANT:  { label:'Brilliant',  sym:'💎', cls:'cl-brilliant'  },
     BOOK:       { label:'Book',       sym:'📖', cls:'cl-book'       },
     BEST:       { label:'Best',       sym:'!!', cls:'cl-best'       },
     EXCELLENT:  { label:'Excellent',  sym:'!',  cls:'cl-excellent'  },
@@ -138,6 +139,7 @@ const Board = (() => {
   //   reviewData[i] : review object from server or null
   let halfMoves    = [];
   let reviewData   = [];
+  let _gameResult  = null;   // '1-0' | '0-1' | '1/2-1/2' — set when game ends
   let flipped      = false;
   let playerColor  = 'white';
   let _engineDepth = 3;
@@ -759,6 +761,136 @@ const Board = (() => {
   }
 
   /* ════════════════════════════════════════════
+     ACCURACY — computed from reviewData
+     score per move = max(0, 100 - delta/10)
+     delta = best_eval_cp - eval_after_cp from mover's view (≥0)
+  ════════════════════════════════════════════ */
+  /** Compute accuracy stats for a single side from a filtered array of review objects. */
+  function _statsForSide(revs){
+    let scores=[], blunders=0, mistakes=0, inaccuracies=0, brilliants=0;
+    for(const rev of revs){
+      if(!rev) continue;
+      const cl=_classifyFromReview(rev);
+      if(cl){
+        if(cl.cls==='cl-blunder')         blunders++;
+        else if(cl.cls==='cl-mistake')    mistakes++;
+        else if(cl.cls==='cl-inaccuracy') inaccuracies++;
+        else if(cl.cls==='cl-brilliant')  brilliants++;
+      }
+      const b=rev.best_eval_cp, a=rev.eval_after_cp;
+      if(b!=null && a!=null){
+        const sign=(rev.moving_color==='white')?1:-1;
+        const delta=Math.max(0, sign*(b-a));
+        scores.push(Math.max(0, 100 - delta/10));
+      }
+    }
+    const accuracy = scores.length
+      ? Math.round(scores.reduce((s,x)=>s+x,0)/scores.length)
+      : 100;
+    return { accuracy, blunders, mistakes, inaccuracies, brilliants };
+  }
+
+  /**
+   * Compute accuracy stats for both sides.
+   * Uses moving_color field — reliable even after undo/redo.
+   * Returns { overall, white, black }.
+   */
+  function _computeAccuracyStats(){
+    // Filter by moving_color (set by server per move — not index-based)
+    const whiteRevs = reviewData.filter(r=>r && r.moving_color==='white');
+    const blackRevs = reviewData.filter(r=>r && r.moving_color==='black');
+    const overall   = _statsForSide(reviewData.filter(Boolean));
+    const white     = _statsForSide(whiteRevs);
+    const black     = _statsForSide(blackRevs);
+    return { overall, white, black };
+  }
+
+  /* ════════════════════════════════════════════
+     EVAL GRAPH — drawn on a <canvas>
+  ════════════════════════════════════════════ */
+  function _drawEvalGraph(canvasId){
+    const canvas=document.getElementById(canvasId);
+    if(!canvas) return;
+    const ctx=canvas.getContext('2d');
+    const W=canvas.width, H=canvas.height;
+    ctx.clearRect(0,0,W,H);
+
+    const evals=reviewData
+      .filter(r=>r && r.eval_after!=null)
+      .map(r=>r.eval_after);
+
+    if(evals.length<2){
+      ctx.fillStyle='#1a1a1a'; ctx.fillRect(0,0,W,H);
+      ctx.fillStyle='#444'; ctx.font='11px monospace';
+      ctx.textAlign='center'; ctx.fillText('No eval data',W/2,H/2+4);
+      return;
+    }
+
+    const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+    const lo=-6, hi=6;
+    const toY=v=>H-(clamp(v,lo,hi)-lo)/(hi-lo)*H;
+    const toX=i=>i/(evals.length-1)*(W-2)+1;
+    const zy=toY(0);
+
+    // background
+    ctx.fillStyle='#111'; ctx.fillRect(0,0,W,H);
+
+    // white-advantage fill (above zero line)
+    ctx.beginPath();
+    ctx.moveTo(toX(0),zy);
+    for(let i=0;i<evals.length;i++){
+      const y=toY(evals[i]);
+      ctx.lineTo(toX(i), Math.min(y,zy));
+    }
+    ctx.lineTo(toX(evals.length-1),zy);
+    ctx.closePath();
+    ctx.fillStyle='rgba(220,210,190,0.45)'; ctx.fill();
+
+    // black-advantage fill (below zero line)
+    ctx.beginPath();
+    ctx.moveTo(toX(0),zy);
+    for(let i=0;i<evals.length;i++){
+      const y=toY(evals[i]);
+      ctx.lineTo(toX(i), Math.max(y,zy));
+    }
+    ctx.lineTo(toX(evals.length-1),zy);
+    ctx.closePath();
+    ctx.fillStyle='rgba(40,40,40,0.6)'; ctx.fill();
+
+    // zero line
+    ctx.strokeStyle='#444'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(0,zy); ctx.lineTo(W,zy); ctx.stroke();
+
+    // eval line
+    ctx.beginPath();
+    ctx.strokeStyle='#c8a96e'; ctx.lineWidth=1.5; ctx.lineJoin='round';
+    evals.forEach((v,i)=>{
+      if(i===0) ctx.moveTo(toX(i),toY(v));
+      else ctx.lineTo(toX(i),toY(v));
+    });
+    ctx.stroke();
+  }
+
+  /* ════════════════════════════════════════════
+     SAVE GAME — POST /save_game
+  ════════════════════════════════════════════ */
+  async function _doSaveGame(stats){
+    const body={
+      moves:    halfMoves,
+      result:   _gameResult||'?',
+      accuracy: stats,
+      date:     new Date().toISOString(),
+    };
+    const r=await fetch('/save_game',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body),
+    });
+    if(!r.ok) throw new Error(await r.text());
+    return r.json();
+  }
+
+  /* ════════════════════════════════════════════
      GAME OVER
   ════════════════════════════════════════════ */
   function _isOver(d){
@@ -772,6 +904,11 @@ const Board = (() => {
     else if(d.status==='draw_repetition') msg='Draw — threefold repetition.';
     else                                  msg='Draw (50-move rule).';
     setStatus('dot-x',msg);
+
+    // Capture result for save game
+    if(d.status==='checkmate') _gameResult=d.winner==='white'?'1-0':'0-1';
+    else _gameResult='1/2-1/2';
+
     _clearHint(); render();
     _showEndModal(d);
   }
@@ -790,6 +927,22 @@ const Board = (() => {
     }else{
       icon='½'; title='Draw'; subtitle='50-move rule';
     }
+
+    const stats=_computeAccuracyStats();
+
+    // Helper: render one side's stat block
+    const _sideBlock=(label, s, colorClass)=>`
+      <div class="pg-side-block ${colorClass}">
+        <div class="pg-side-header">${label}</div>
+        <div class="pg-side-accuracy ${_accClass(s.accuracy)}">${s.accuracy}%</div>
+        <div class="pg-side-counters">
+          ${s.brilliants?`<span class="pg-sc pg-brilliant" title="Brilliant">💎${s.brilliants}</span>`:''}
+          <span class="pg-sc pg-blunder"    title="Blunders">??${s.blunders}</span>
+          <span class="pg-sc pg-mistake"    title="Mistakes">?${s.mistakes}</span>
+          <span class="pg-sc pg-inaccuracy" title="Inaccuracies">?!${s.inaccuracies}</span>
+        </div>
+      </div>`;
+
     const ov=document.createElement('div');
     ov.id='end-game-modal'; ov.className='end-modal-overlay';
     ov.innerHTML=`
@@ -797,15 +950,49 @@ const Board = (() => {
         <div class="end-modal-icon">${icon}</div>
         <h2 class="end-modal-title">${title}</h2>
         <p class="end-modal-sub">${subtitle}</p>
+
+        <div class="pg-sides">
+          ${_sideBlock('♙ White', stats.white, 'pg-side-white')}
+          ${_sideBlock('♟ Black', stats.black, 'pg-side-black')}
+        </div>
+
+        <canvas id="end-eval-graph" width="300" height="68"
+                style="display:block;margin:12px auto 16px;border-radius:4px;"></canvas>
+
         <div class="end-modal-btns">
           <button class="btn btn-gold"  id="end-new-game">↺ New Game</button>
-          <button class="btn btn-ghost" id="end-close">✕ Close</button>
+          <button class="btn btn-ghost" id="end-save"    >💾 Save</button>
+          <button class="btn btn-ghost" id="end-close"   >✕ Close</button>
         </div>
       </div>`;
+
     ov.querySelector('#end-new-game').addEventListener('click',()=>{ ov.remove(); resetGame(); });
     ov.querySelector('#end-close').addEventListener('click',()=>ov.remove());
     ov.addEventListener('click',e=>{ if(e.target===ov) ov.remove(); });
+
+    const saveBtn=ov.querySelector('#end-save');
+    saveBtn.addEventListener('click',async()=>{
+      saveBtn.disabled=true; saveBtn.textContent='Saving…';
+      try{
+        await _doSaveGame(stats.overall);
+        saveBtn.textContent='✓ Saved';
+      }catch(e){
+        saveBtn.textContent='Failed';
+        saveBtn.disabled=false;
+      }
+    });
+
     document.body.appendChild(ov);
+
+    // Draw graph after modal is in the DOM (requestAnimationFrame to be safe)
+    requestAnimationFrame(()=>_drawEvalGraph('end-eval-graph'));
+  }
+
+  /** Return CSS class for accuracy value colour coding. */
+  function _accClass(acc){
+    if(acc>=80) return 'acc-high';
+    if(acc>=55) return 'acc-mid';
+    return 'acc-low';
   }
   function _updateTurnStatus(){
     setStatus(turn==='white'?'dot-w':'dot-b',
@@ -889,7 +1076,7 @@ const Board = (() => {
 
     selected=null; legal=[]; lastMove=null;
     capByW=[]; capByB=[]; gameOver=false; promoWait=null;
-    halfMoves=[]; reviewData=[];
+    halfMoves=[]; reviewData=[]; _gameResult=null;
     dragActive=false; dragFrom=null;
     if(dragEl){ dragEl.remove(); dragEl=null; }
     window._chkSq=null;
@@ -913,6 +1100,9 @@ const Board = (() => {
     _initSounds();
 
     setStatus('dot-t','Loading…');
+    // Always reset backend state on init so a fresh game begins cleanly.
+    // This handles: Home→Game navigation, mode changes, and page reloads.
+    try{ await POST('/reset',{}); }catch(e){ console.warn('[Board.init] reset failed:',e); }
     const data=await GET('/state');
     applyState(data);
     _updateTurnStatus();
@@ -928,7 +1118,7 @@ const Board = (() => {
     catch(e){ setStatus('dot-x','Reset error: '+e.message); return; }
     selected=null; legal=[]; lastMove=null;
     capByW=[]; capByB=[]; gameOver=false; promoWait=null;
-    halfMoves=[]; reviewData=[];
+    halfMoves=[]; reviewData=[]; _gameResult=null;
     dragActive=false; dragFrom=null;
     if(dragEl){ dragEl.remove(); dragEl=null; }
     window._chkSq=null;
