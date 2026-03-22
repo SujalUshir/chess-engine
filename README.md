@@ -1,6 +1,40 @@
 # ♟️ Chess Engine Web App with Stockfish Analysis
 
-A full-stack chess application featuring a custom chess engine, Stockfish integration, and advanced move analysis — similar to chess.com / lichess analysis tools.
+## 🔗 Live Demo (Coming Soon)
+
+A full-stack chess application featuring a custom chess engine, Stockfish integration, and advanced move analysis — inspired by platforms like chess.com and lichess.
+
+---
+
+## 📸 Screenshots
+
+### 🏠 Home Screen
+
+![Home](screenshots/home.png)
+
+### ♟️ Gameplay (Human vs Human)
+
+![Game](screenshots/game.png)
+
+### 🤖 Gameplay with Analysis (Stockfish)
+
+![Analysis](screenshots/analysis.png)
+
+### 🎯 Game Setup & Mode Selection
+
+![Summary](screenshots/summary.png)
+
+### ⚙️ Settings Panel
+
+![Settings](screenshots/settings.png)
+
+### 📖 Project Info Page (Features Overview)
+
+![Info Features](screenshots/info-features.png)
+
+### 🧠 Technologies & Architecture Overview
+
+![Info Tech](screenshots/info-tech.png)
 
 ---
 
@@ -47,7 +81,7 @@ A full-stack chess application featuring a custom chess engine, Stockfish integr
 
 * Undo / Redo with full state restoration
 * Save game functionality
-* Interactive board (click + drag)
+* Interactive board UI
 * Sound effects
 
 ---
@@ -61,12 +95,40 @@ A full-stack chess application featuring a custom chess engine, Stockfish integr
 
 ---
 
-## ⚡ Key Highlights
+## 🏗️ Architecture
 
-* Snapshot-based undo/redo system
-* Dual evaluation (custom engine vs Stockfish)
-* Real-time analysis pipeline
-* REST API architecture
+* Frontend (JavaScript SPA) communicates with backend via REST API
+* Backend (Flask) handles:
+
+  * Move validation
+  * Game state management
+  * Engine evaluation
+  * Stockfish integration
+* Move history stores:
+
+  * evaluation before/after
+  * best move
+  * classification
+* Snapshot-based system used for undo/redo
+
+---
+
+## ⚠️ Stockfish Setup
+
+Stockfish binary is **not included** in this repository.
+
+### Steps:
+
+1. Download Stockfish from:
+   https://stockfishchess.org/download/
+
+2. Place the executable in the project root directory
+
+3. Ensure your backend points to the correct path:
+
+```python
+STOCKFISH_PATH = "stockfish.exe"
+```
 
 ---
 
