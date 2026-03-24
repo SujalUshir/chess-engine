@@ -1,9 +1,8 @@
 __pycache__/
 *.pyc
-stockfish*
 .env
 .vscode/
-stockfish/*.exe
-*.exe
 *.json
 stockfish/
+stockfish*
+*.exe
