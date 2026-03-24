@@ -2,7 +2,7 @@
 Chess Engine — Flask Backend
 python app.py
 """
-
+import os
 import copy, traceback, os, json, datetime, threading
 from flask import Flask, jsonify, request, render_template, send_from_directory
 import engine
@@ -48,7 +48,7 @@ def _init_stockfish():
         from stockfish import Stockfish
 
         # Use system-installed Stockfish (Render path)
-        sf = Stockfish(path="/usr/games/stockfish")
+        sf = Stockfish(path="./bin/stockfish")
 
         sf.set_depth(12)
         sf.set_fen_position("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
