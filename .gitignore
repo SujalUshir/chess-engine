@@ -6,3 +6,4 @@ stockfish*
 stockfish/*.exe
 *.exe
 *.json
+stockfish/
