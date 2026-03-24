@@ -46,21 +46,26 @@ def _init_stockfish():
     global _sf, STOCKFISH_OK, STOCKFISH_ERR
     try:
         from stockfish import Stockfish
-        # stockfish-binary provides the correct bundled binary path via get_stockfish_path()
-        from stockfish import get_stockfish_path
-        sf = Stockfish(path=get_stockfish_path())
+
+        # Use system-installed Stockfish (Render path)
+        sf = Stockfish(path="/usr/games/stockfish")
+
         sf.set_depth(12)
         sf.set_fen_position("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+
         move = sf.get_best_move()
+
         if move:
             _sf = sf
             STOCKFISH_OK = True
-            log.info("[Stockfish] Ready — bundled binary, test_move=%s", move)
+            log.info("[Stockfish] Ready — system binary, test_move=%s", move)
+        else:
+            raise Exception("Stockfish returned no move")
+
     except Exception as e:
         STOCKFISH_ERR = str(e)
         log.warning("[Stockfish] Init failed: %s", e)
         log.warning("[Stockfish] Stockfish features will be disabled.")
-_init_stockfish()
 
 # ── Undo / Redo stacks ────────────────────────────────────────────────────────
 # Each entry is a tuple: (board_snap, move_history_snapshot)
@@ -1030,12 +1035,9 @@ def save_game():
 def debug():
     sounds_dir = os.path.join(PROJECT_DIR, "sounds")
     static_sounds_dir = os.path.join(PROJECT_DIR, "static", "sounds")
-    sf_path = "unavailable"
-    try:
-        from stockfish import get_stockfish_path
-        sf_path = get_stockfish_path()
-    except Exception:
-        pass
+
+    sf_path = "/usr/games/stockfish"
+    sf_exists = os.path.exists(sf_path)
     return jsonify({
         "stockfish_ok":      STOCKFISH_OK,
         "stockfish_error":   STOCKFISH_ERR,
