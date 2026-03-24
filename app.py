@@ -80,7 +80,7 @@ def _init_stockfish():
     log.info("[Stockfish] Place the Linux binary at: stockfish/stockfish")
     log.info("[Stockfish] Download from: https://stockfishchess.org/download/")
 
-#_init_stockfish()
+_init_stockfish()
 
 # ── Undo / Redo stacks ────────────────────────────────────────────────────────
 # Each entry is a tuple: (board_snap, move_history_snapshot)
