@@ -49,8 +49,7 @@ def _init_stockfish():
 
     # Linux-first candidate list — Windows .exe paths removed
     candidates = [
-    SF_PATH,
-    os.path.join(PROJECT_DIR, 'stockfish'),
+    os.path.join(PROJECT_DIR, "stockfish", "stockfish"),
 ]
 
     for path in candidates:
