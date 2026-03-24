@@ -3,6 +3,6 @@ __pycache__/
 stockfish*
 .env
 .vscode/
-stockfish*
+stockfish/*.exe
 *.exe
 *.json
