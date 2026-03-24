@@ -1,3 +1,4 @@
 flask
-stockfish
 gunicorn
+stockfish
+stockfish-binary
