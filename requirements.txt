@@ -1,0 +1,3 @@
+flask
+stockfish
+gunicorn

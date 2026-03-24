@@ -1,8 +1,20 @@
 # ♟️ Chess Engine Web App with Stockfish Analysis
 
-## 🔗 Live Demo (Coming Soon)
+## 🔗 Live Demo
 
-A full-stack chess application featuring a custom chess engine, Stockfish integration, and advanced move analysis — inspired by platforms like chess.com and lichess.
+👉 https://your-app.onrender.com *(replace after deploy)*
+
+A full-stack chess web application featuring a custom-built engine, Stockfish integration, and advanced move analysis — inspired by platforms like Chess.com and Lichess.
+
+---
+
+## ⭐ Highlights
+
+* Built a custom chess engine using **minimax + alpha-beta pruning**
+* Integrated **Stockfish** for evaluation and move validation
+* Designed a **move classification system** (Brilliant → Blunder)
+* Implemented **undo/redo using snapshot-based state management**
+* Deployed using **Flask + Gunicorn on Render**
 
 ---
 
@@ -28,11 +40,11 @@ A full-stack chess application featuring a custom chess engine, Stockfish integr
 
 ![Settings](screenshots/settings.png)
 
-### 📖 Project Info Page (Features Overview)
+### 📖 Features Overview
 
 ![Info Features](screenshots/info-features.png)
 
-### 🧠 Technologies & Architecture Overview
+### 🧠 Tech & Architecture Overview
 
 ![Info Tech](screenshots/info-tech.png)
 
@@ -59,6 +71,7 @@ A full-stack chess application featuring a custom chess engine, Stockfish integr
   * Inaccuracy
   * Mistake
   * Blunder
+
 * Best move suggestions:
 
   * Current position
@@ -70,9 +83,11 @@ A full-stack chess application featuring a custom chess engine, Stockfish integr
 
 * Accuracy system:
 
-  * Accuracy % for both White and Black
+  * Accuracy % for White & Black
   * Blunders, Mistakes, Inaccuracies
+
 * Evaluation graph (Stockfish-based)
+
 * Full move-by-move analysis
 
 ---
@@ -82,6 +97,7 @@ A full-stack chess application featuring a custom chess engine, Stockfish integr
 * Undo / Redo with full state restoration
 * Save game functionality
 * Interactive board UI
+* Drag-and-drop + click-to-move
 * Sound effects
 
 ---
@@ -97,49 +113,42 @@ A full-stack chess application featuring a custom chess engine, Stockfish integr
 
 ## 🏗️ Architecture
 
-* Frontend (JavaScript SPA) communicates with backend via REST API
-* Backend (Flask) handles:
+* Frontend (SPA) communicates with backend via REST APIs
+
+* Backend handles:
 
   * Move validation
   * Game state management
   * Engine evaluation
   * Stockfish integration
+
 * Move history stores:
 
-  * evaluation before/after
+  * eval_before / eval_after
   * best move
   * classification
+
 * Snapshot-based system used for undo/redo
 
 ---
 
-## ⚠️ Stockfish Setup
+## ⚡ Performance Notes
 
-Stockfish binary is **not included** in this repository.
-
-### Steps:
-
-1. Download Stockfish from:
-   https://stockfishchess.org/download/
-
-2. Place the executable in the project root directory
-
-3. Ensure your backend points to the correct path:
-
-```python
-STOCKFISH_PATH = "stockfish.exe"
-```
+* Iterative deepening with alpha-beta pruning
+* Efficient state snapshots for fast undo/redo
+* Move ordering using heuristics
+* Minimal recomputation of board states
 
 ---
 
 ## 🛠️ Run Locally
 
 ```bash
-pip install flask
+pip install -r requirements.txt
 python app.py
 ```
 
-Open in browser:
+Open:
 
 ```
 http://127.0.0.1:5000
@@ -147,21 +156,125 @@ http://127.0.0.1:5000
 
 ---
 
+## ⚠️ Stockfish Setup
+
+Stockfish binary is **not included** in this repository.
+
+### Linux / Render
+
+1. Download from:
+   https://stockfishchess.org/download/
+
+2. Place it at:
+
+```
+stockfish/stockfish
+```
+
+3. Make executable:
+
+```bash
+chmod +x stockfish/stockfish
+```
+
+> The app runs without Stockfish, but Stockfish-specific features will be disabled.
+
+---
+
+## 🚀 Deploy on Render
+
+### Steps
+
+1. Push project to GitHub
+
+2. Go to https://render.com → New Web Service
+
+3. Configure:
+
+| Setting       | Value                             |
+| ------------- | --------------------------------- |
+| Environment   | Python                            |
+| Build Command | `pip install -r requirements.txt` |
+| Start Command | `gunicorn app:app`                |
+
+4. Deploy 🚀
+
+---
+
+## ⚠️ Render Storage Note
+
+Render uses **ephemeral storage**, meaning:
+
+* `saved_games.json` resets on every deploy
+* Saved games are not persistent
+
+### Options:
+
+* Accept temporary storage (simplest)
+* OR use Render Disk for persistence
+
+---
+
+## 📊 Google Analytics
+
+Google Analytics is integrated in `index.html`.
+
+### To enable:
+
+1. Go to https://analytics.google.com
+2. Get Measurement ID (`G-XXXXXXXXXX`)
+3. Replace it in `index.html`
+
+---
+
+## 📁 Project Structure
+
+```
+chess-engine/
+├── app.py
+├── engine.py
+├── requirements.txt
+├── Procfile
+├── saved_games.json
+├── stockfish/
+├── sounds/
+├── static/
+└── templates/
+```
+
+---
+
+## 🧪 Debug Endpoint
+
+After deployment:
+
+```
+/debug
+```
+
+Check:
+
+```json
+"stockfish_ok": true
+```
+
+---
+
 ## 📌 Future Improvements
 
-* Performance optimization (reduce Stockfish calls)
 * Multiplayer support
 * Cloud save system
-* Deployment
+* WASM-based engine optimization
+* Performance tuning
 
 ---
 
 ## 💡 Project Status
 
-> Near complete — minor debugging and performance improvements remaining.
+> Production-ready — deployed using Flask + Gunicorn on Render.
 
 ---
 
 ## 👤 Author
 
-Sujal Ushir
+**Sujal Ushir**

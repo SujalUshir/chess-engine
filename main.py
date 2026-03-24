@@ -1,651 +1,801 @@
-import pygame
+"""
+Chess Engine — Flask Backend
+Run locally:  python app.py
+Production:   gunicorn app:app
+"""
+import copy, traceback, os, json, datetime, threading, logging
+from flask import Flask, jsonify, request, render_template, send_from_directory
 import engine
-import time
-import copy
-import math
-promotion_mode=False
-promotion_square=None
-promotion_choices=["Q","R","B","N"]
 
-mouse_pos=(0,0)
+# ── Logging (replaces all print statements) ───────────────────────────────────
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+log = logging.getLogger(__name__)
 
+app = Flask(__name__)
 
-WIDTH = 700
-HEIGHT = 512
-BOARD_SIZE = 512
-SQ_SIZE = BOARD_SIZE // 8
+# ── Constants ──────────────────────────────────────────────────────────────────
+MATE_SCORE   = -999.99
+_PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+_SAVE_PATH   = os.path.join(_PROJECT_DIR, "saved_games.json")
+_SOUNDS_DIR  = os.path.join(_PROJECT_DIR, "sounds")
+_SF_PATH     = os.path.join(_PROJECT_DIR, "stockfish", "stockfish")
 
-pygame.init()
-pygame.mixer.init()
+# ── Serve sounds ───────────────────────────────────────────────────────────────
+@app.route("/sounds/<path:filename>")
+def serve_sound(filename):
+    return send_from_directory(_SOUNDS_DIR, filename)
 
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Chess")
+# ── Stockfish init ─────────────────────────────────────────────────────────────
+_sf           = None
+_sf_lock      = threading.Lock()
+STOCKFISH_OK  = False
+STOCKFISH_ERR = ""
 
-move_sound = pygame.mixer.Sound("sounds/move.wav")
+def _init_stockfish():
+    global _sf, STOCKFISH_OK, STOCKFISH_ERR
 
-LIGHT = (240,217,181)
-DARK = (181,136,99)
-BG = (30,30,30)
-PANEL = (40,40,40)
-
-IMAGES = {}
-
-selected_square=None
-legal_moves=[]
-last_move=None
-
-dragging=False
-drag_piece=None
-drag_from=None
-mouse_x=0
-mouse_y=0
-
-click_start=None
-drag_threshold=5
-
-move_log=[]
-undo_stack=[]
-redo_stack=[]
-
-eval_score=0
-display_score=0
-pv_line=""
-engine_depth=0
-engine_thinking=False
-
-game_over=False
-game_result=""
-
-hover_square=None
-
-undo_btn = pygame.Rect(520,450,70,30)
-redo_btn = pygame.Rect(600,450,70,30)
-restart_btn = pygame.Rect(520, 410, 150, 30)
-
-arrow_start=None
-preview_arrow=None
-arrows=[]
-
-capture_anim=None
-
-sound_on=True
-show_highlights=True
-
-
-def draw_promotion():
-    if not promotion_mode:
+    if not os.path.exists(_SF_PATH):
+        STOCKFISH_ERR = f"Binary not found at {_SF_PATH}"
+        log.warning("[Stockfish] %s", STOCKFISH_ERR)
+        log.warning("[Stockfish] Place the Linux binary at: stockfish/stockfish")
         return
 
-    r,c = promotion_square
-
-    for i,p in enumerate(promotion_choices):
-        rect = pygame.Rect(c*SQ_SIZE, r*SQ_SIZE+i*SQ_SIZE, SQ_SIZE, SQ_SIZE)
-        pygame.draw.rect(screen,(50,50,50),rect)
-
-        board_piece = engine.board[r][c]
-        piece = ("w"+p.lower()) if board_piece.isupper() else ("b"+p.lower())
-        screen.blit(IMAGES[piece],(rect.x,rect.y))
-
-
-def draw_history():
-    font=pygame.font.SysFont(None,18)
-    x=530
-    y=70
-
-    for i in range(0,len(move_log),2):
-        w=move_log[i]
-        b=move_log[i+1] if i+1<len(move_log) else ""
-        text=f"{i//2+1}. {w} {b}"
-        screen.blit(font.render(text,True,(220,220,220)),(x,y))
-        y+=18
-
-
-def draw_settings():
-    font=pygame.font.SysFont(None,18)
-    screen.blit(font.render(f"[S] Sound: {'ON' if sound_on else 'OFF'}",True,(200,200,200)),(520,400))
-    screen.blit(font.render(f"[H] Highlights: {'ON' if show_highlights else 'OFF'}",True,(200,200,200)),(520,420))
-
-def draw_engine_info():
-    font=pygame.font.SysFont(None,18)
-
-    y=350
-
-    screen.blit(font.render(f"Eval: {display_score/100:.2f}",True,(200,200,200)),(520,y))
-    y+=18
-    screen.blit(font.render(f"Depth: {engine_depth}",True,(200,200,200)),(520,y))
-    y+=18
-    screen.blit(font.render(f"Best: {pv_line}",True,(200,200,200)),(520,y))
-    y+=18
-
-    if engine_thinking:
-        screen.blit(font.render("Thinking...",True,(255,200,0)),(520,y))
-
-
-########################################
-def load_images():
-    pieces=["wp","wr","wn","wb","wq","wk","bp","br","bn","bb","bq","bk"]
-    for p in pieces:
-        IMAGES[p]=pygame.transform.scale(
-            pygame.image.load("images/"+p+".png"),
-            (SQ_SIZE,SQ_SIZE)
-        )
-
-########################################
-def draw_board():
-    for r in range(8):
-        for c in range(8):
-            color = LIGHT if (r+c)%2==0 else DARK
-            pygame.draw.rect(screen,color,(c*SQ_SIZE,r*SQ_SIZE,SQ_SIZE,SQ_SIZE))
-    pygame.draw.rect(screen,(100,100,100),(0,0,512,512),3)
-
-########################################
-def draw_hover():
-    if hover_square:
-        r,c = hover_square
-        s = pygame.Surface((SQ_SIZE,SQ_SIZE), pygame.SRCALPHA)
-        s.fill((255,255,255,40))
-        screen.blit(s,(c*SQ_SIZE,r*SQ_SIZE))
-
-########################################
-def draw_last_move():
-    if not last_move or not show_highlights:
-        return
-    (sr,sc),(er,ec)=last_move
-    s = pygame.Surface((SQ_SIZE,SQ_SIZE), pygame.SRCALPHA)
-    s.fill((255,215,0,120))
-    screen.blit(s,(sc*SQ_SIZE,sr*SQ_SIZE))
-    screen.blit(s,(ec*SQ_SIZE,er*SQ_SIZE))
-
-########################################
-def draw_check():
-    if not show_highlights:
-        return
-    for color in ["white","black"]:
-        if engine.is_king_in_check(engine.board,color):
-            king_pos=engine.find_king(engine.board,color)
-            if king_pos:
-                r,c=king_pos
-                s=pygame.Surface((SQ_SIZE,SQ_SIZE),pygame.SRCALPHA)
-                s.fill((255,0,0,120))
-                screen.blit(s,(c*SQ_SIZE,r*SQ_SIZE))
-
-########################################
-def draw_selected():
-    if selected_square and show_highlights:
-        s = pygame.Surface((SQ_SIZE,SQ_SIZE), pygame.SRCALPHA)
-        s.fill((0,0,255,80))
-        r,c = selected_square
-        screen.blit(s,(c*SQ_SIZE,r*SQ_SIZE))
-
-########################################
-# ✅ IMPROVED ARROWS
-########################################
-def draw_arrows():
-    for (sr,sc),(er,ec) in arrows:
-        start=(sc*SQ_SIZE+SQ_SIZE//2, sr*SQ_SIZE+SQ_SIZE//2)
-        end=(ec*SQ_SIZE+SQ_SIZE//2, er*SQ_SIZE+SQ_SIZE//2)
-
-        pygame.draw.line(screen,(220,50,50),start,end,5)
-
-        dx=end[0]-start[0]
-        dy=end[1]-start[1]
-        angle=math.atan2(dy,dx)
-
-        length=15
-        left=(end[0]-length*math.cos(angle-0.5),
-              end[1]-length*math.sin(angle-0.5))
-        right=(end[0]-length*math.cos(angle+0.5),
-               end[1]-length*math.sin(angle+0.5))
-
-        pygame.draw.polygon(screen,(220,50,50),[end,left,right])
-
-    if preview_arrow:
-        (sr,sc),(er,ec)=preview_arrow
-        start=(sc*SQ_SIZE+32,sr*SQ_SIZE+32)
-        end=(ec*SQ_SIZE+32,er*SQ_SIZE+32)
-        pygame.draw.line(screen,(0,255,0),start,end,3)
-
-########################################
-def draw_capture_anim():
-    global capture_anim
-    if not capture_anim:
+    if not os.access(_SF_PATH, os.X_OK):
+        STOCKFISH_ERR = f"Binary not executable — run: chmod +x {_SF_PATH}"
+        log.warning("[Stockfish] %s", STOCKFISH_ERR)
         return
 
-    r,c,alpha=capture_anim
-    s=pygame.Surface((SQ_SIZE,SQ_SIZE),pygame.SRCALPHA)
-    s.fill((255,0,0,alpha))
-    screen.blit(s,(c*SQ_SIZE,r*SQ_SIZE))
+    try:
+        from stockfish import Stockfish
+        sf = Stockfish(path=_SF_PATH)
+        sf.set_depth(12)
+        sf.set_fen_position("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+        move = sf.get_best_move()
+        if move:
+            _sf = sf
+            STOCKFISH_OK = True
+            log.info("[Stockfish] Ready — path=%s, test_move=%s", _SF_PATH, move)
+    except Exception as e:
+        STOCKFISH_ERR = str(e)
+        log.warning("[Stockfish] Init failed: %s", e)
 
-    capture_anim=(r,c,alpha-15)
-    if capture_anim[2]<=0:
-        capture_anim=None
+_init_stockfish()
 
-########################################
-def draw_pieces():
-    for r in range(8):
-        for c in range(8):
-            piece=engine.board[r][c]
-            if piece!=".":
-                if dragging and (r,c)==drag_from:
-                    continue
-                key=("w" if piece.isupper() else "b")+piece.lower()
-                screen.blit(IMAGES[key],(c*SQ_SIZE,r*SQ_SIZE))
+# ── Saved-games file: create if missing ──────────────────────────────────────
+def _ensure_save_file():
+    if not os.path.exists(_SAVE_PATH):
+        try:
+            with open(_SAVE_PATH, "w", encoding="utf-8") as f:
+                json.dump([], f)
+        except OSError:
+            log.warning("[SaveGames] Cannot create %s — saves will not persist (ephemeral storage).", _SAVE_PATH)
 
-########################################
-def draw_drag_piece():
-    if dragging and drag_piece:
-        screen.blit(IMAGES[drag_piece],
-                    (mouse_x - SQ_SIZE//2 + 2, mouse_y - SQ_SIZE//2 + 2))
+_ensure_save_file()
 
-########################################
-def animate(fr,fc,tr,tc,key):
-    sx,sy=fc*SQ_SIZE,fr*SQ_SIZE
-    ex,ey=tc*SQ_SIZE,tr*SQ_SIZE
-    frames = 20
+# ── Undo / Redo stacks ────────────────────────────────────────────────────────
+_undo_stack = []
+_redo_stack = []
 
-    for i in range(1,frames+1):
-        t=i/frames
-        t = t*t*(3-2*t)
+# ── Move history ──────────────────────────────────────────────────────────────
+_move_history = []
 
-        x=sx+(ex-sx)*t
-        y=sy+(ey-sy)*t
+# ── Fullmove counter ──────────────────────────────────────────────────────────
+_fullmove_counter = 1
 
-        draw_board()
-        draw_hover()
-        draw_last_move()
-        draw_arrows()
-        draw_selected()
-        draw_highlights()
-        draw_check()
-        draw_pieces()
-        screen.blit(IMAGES[key],(x,y))
-        draw_panel()
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+def _snap():
+    return {
+        "board":              copy.deepcopy(engine.board),
+        "current_turn":       engine.current_turn,
+        "en_passant_target":  engine.en_passant_target,
+        "halfmove_clock":     engine.halfmove_clock,
+        "white_king_moved":   engine.white_king_moved,
+        "black_king_moved":   engine.black_king_moved,
+        "white_rook_a_moved": engine.white_rook_a_moved,
+        "white_rook_h_moved": engine.white_rook_h_moved,
+        "black_rook_a_moved": engine.black_rook_a_moved,
+        "black_rook_h_moved": engine.black_rook_h_moved,
+    }
 
-        pygame.display.flip()
-        pygame.time.delay(8)
+def _restore(s):
+    engine.board[:]            = s["board"]
+    engine.current_turn        = s["current_turn"]
+    engine.en_passant_target   = s["en_passant_target"]
+    engine.halfmove_clock      = s["halfmove_clock"]
+    engine.white_king_moved    = s["white_king_moved"]
+    engine.black_king_moved    = s["black_king_moved"]
+    engine.white_rook_a_moved  = s["white_rook_a_moved"]
+    engine.white_rook_h_moved  = s["white_rook_h_moved"]
+    engine.black_rook_a_moved  = s["black_rook_a_moved"]
+    engine.black_rook_h_moved  = s["black_rook_h_moved"]
 
-########################################
-def get_legal_moves(row,col):
-    moves=engine.generate_all_legal_moves(engine.board,engine.current_turn)
-    res=[]
-    fs=engine.index_to_notation(row,col)
+def _snap_full():
+    return (_snap(), copy.deepcopy(_move_history))
 
-    for m in moves:
-        if m[0]==fs:
-            r,c=engine.notation_to_index(m[1])
-            piece=engine.board[row][col]
-            target=engine.board[r][c]
+def _restore_full(entry):
+    board_snap, history_snap = entry
+    _restore(board_snap)
+    _move_history.clear()
+    _move_history.extend(history_snap)
 
-            t="normal"
-            if target!=".": t="capture"
-            if piece.upper()=="K" and abs(c-col)==2: t="castle"
-            if piece.upper()=="P" and (r,c)==engine.en_passant_target: t="enpassant"
+def _game_status():
+    turn = engine.current_turn
+    if engine.is_checkmate(engine.board, turn):
+        return {"status": "checkmate", "winner": "black" if turn == "white" else "white"}
+    if engine.is_stalemate(engine.board, turn):
+        return {"status": "stalemate", "winner": None}
+    if engine.halfmove_clock >= 100:
+        return {"status": "draw_50_move", "winner": None}
+    if _is_insufficient_material():
+        return {"status": "draw_material", "winner": None}
+    if any(v >= 3 for v in engine.position_history.values()):
+        return {"status": "draw_repetition", "winner": None}
+    if engine.is_king_in_check(engine.board, turn):
+        return {"status": "check", "winner": None}
+    return {"status": "ongoing", "winner": None}
 
-            res.append((r,c,t))
-    return res
+def _is_insufficient_material():
+    pieces = {}
+    for row in engine.board:
+        for cell in row:
+            if cell != ".":
+                pieces[cell] = pieces.get(cell, 0) + 1
+    white = {k: v for k, v in pieces.items() if k.isupper() and k != "K"}
+    black = {k: v for k, v in pieces.items() if k.islower() and k != "k"}
+    def only_minor(d):
+        total = sum(d.values())
+        if total == 0: return True
+        if total == 1 and ("N" in d or "B" in d or "n" in d or "b" in d): return True
+        return False
+    return only_minor(white) and only_minor(black)
 
-########################################
-def draw_highlights():
-    if not show_highlights:
-        return
-    for r,c,t in legal_moves:
-        cx=c*SQ_SIZE+32
-        cy=r*SQ_SIZE+32
+_PIECE_VALUES = {
+    "P": 100, "N": 320, "B": 330, "R": 500, "Q": 900,
+    "p": 100, "n": 320, "b": 330, "r": 500, "q": 900,
+}
 
-        if t=="normal":
-            pygame.draw.circle(screen,(0,200,0),(cx,cy),7)
-        elif t=="capture":
-            pygame.draw.circle(screen,(0,200,0),(cx,cy),26,4)
-        elif t=="castle":
-            pygame.draw.circle(screen,(180,0,255),(cx,cy),26,4)
-        elif t=="enpassant":
-            pygame.draw.circle(screen,(0,120,255),(cx,cy),26,4)
+def _material_score(board, color):
+    total = 0
+    for row in board:
+        for cell in row:
+            if cell == ".": continue
+            if color == "white" and cell.isupper() and cell != "K":
+                total += _PIECE_VALUES.get(cell, 0)
+            elif color == "black" and cell.islower() and cell != "k":
+                total += _PIECE_VALUES.get(cell.upper(), 0)
+    return total
 
-########################################
-def update_eval():
-    global eval_score
-    eval_score = engine.evaluate_board(engine.board)
+def _engine_eval():
+    try:
+        return engine.evaluate_board(engine.board)
+    except Exception:
+        return 0
 
-def draw_eval():
-    global display_score
-    display_score+=(eval_score-display_score)*0.1
+def _fen():
+    rows = []
+    for row in engine.board:
+        e, s = 0, ""
+        for cell in row:
+            if cell == ".":
+                e += 1
+            else:
+                if e: s += str(e); e = 0
+                s += cell
+        if e: s += str(e)
+        rows.append(s)
+    t  = "w" if engine.current_turn == "white" else "b"
+    ca = ""
+    if not engine.white_king_moved:
+        if not engine.white_rook_h_moved: ca += "K"
+        if not engine.white_rook_a_moved: ca += "Q"
+    if not engine.black_king_moved:
+        if not engine.black_rook_h_moved: ca += "k"
+        if not engine.black_rook_a_moved: ca += "q"
+    ca = ca or "-"
+    ep = engine.index_to_notation(*engine.en_passant_target) \
+         if engine.en_passant_target else "-"
+    return f"{'/'.join(rows)} {t} {ca} {ep} {engine.halfmove_clock} {_fullmove_counter}"
 
-    score=max(-10,min(10,display_score/100))
-    percent=(score+10)/20
-    h=int(percent*BOARD_SIZE)
+def _sf_eval_at_fen(fen_str):
+    if not STOCKFISH_OK or _sf is None:
+        return None
+    try:
+        with _sf_lock:
+            _sf.set_fen_position(fen_str)
+            info = _sf.get_evaluation()
+        if not info:
+            return None
+        side = fen_str.split()[1] if " " in fen_str else "w"
+        if info["type"] == "cp":
+            cp = info["value"]
+            if side == "b": cp = -cp
+            return cp
+        if info["type"] == "mate":
+            sign = 1 if info["value"] > 0 else -1
+            if side == "b": sign = -sign
+            return sign * 99999
+    except Exception:
+        pass
+    return None
 
-    pygame.draw.rect(screen,(60,60,60),(512,0,10,BOARD_SIZE))
-    pygame.draw.rect(screen,(255,255,255),(512,BOARD_SIZE-h,10,h))
+def _sf_eval():
+    return _sf_eval_at_fen(_fen())
 
-    font = pygame.font.SysFont(None,20)
-    text = f"{display_score/100:.2f}"
-    screen.blit(font.render(text,True,(255,255,255)),(525,10))
+def _sf_best_move_and_eval(fen_str):
+    if not STOCKFISH_OK or _sf is None:
+        return None, None
+    try:
+        with _sf_lock:
+            _sf.set_fen_position(fen_str)
+            best_uci = _sf.get_best_move()
+            if not best_uci or len(best_uci) < 4:
+                return None, None
+            best_eval = None
+            try:
+                _sf.set_fen_position(fen_str)
+                _sf.make_moves_from_current_position([best_uci])
+                info = _sf.get_evaluation()
+                if info:
+                    side = fen_str.split()[1] if " " in fen_str else "w"
+                    if info["type"] == "cp":
+                        cp = info["value"]
+                        if side == "w": cp = -cp
+                        best_eval = cp
+                    elif info["type"] == "mate":
+                        sign = 1 if info["value"] > 0 else -1
+                        if side == "w": sign = -sign
+                        best_eval = sign * 99999
+            except Exception:
+                best_eval = None
+        return best_uci[:4], best_eval
+    except Exception:
+        pass
+    return None, None
 
-########################################
-def draw_buttons():
-    font=pygame.font.SysFont(None,18)
+def _sf_best_move_from_fen(fen_str):
+    if not STOCKFISH_OK or _sf is None:
+        return None
+    try:
+        with _sf_lock:
+            _sf.set_fen_position(fen_str)
+            uci = _sf.get_best_move()
+        if uci and len(uci) >= 4:
+            return uci[:4]
+    except Exception:
+        pass
+    return None
 
-    pygame.draw.rect(screen,(120,60,60),restart_btn)
-    screen.blit(font.render("Restart",True,(255,255,255)),(restart_btn.x+40,restart_btn.y+5))
+def _classify_move(eval_before, best_eval, eval_after, moving_color, sacrificed_material=0):
+    if best_eval is None or eval_after is None:
+        return None
+    if moving_color == "white":
+        played_val, best_val = eval_after, best_eval
+    else:
+        played_val, best_val = -eval_after, -best_eval
+    delta = best_val - played_val
+    if sacrificed_material > 0 and delta <= 30: return "Brilliant"
+    if delta <= 20:  return "Best"
+    if delta <= 50:  return "Excellent"
+    if delta <= 100: return "Good"
+    if delta <= 200: return "Inaccuracy"
+    if delta <= 400: return "Mistake"
+    return "Blunder"
 
-    pygame.draw.rect(screen,(80,80,80),undo_btn)
-    pygame.draw.rect(screen,(80,80,80),redo_btn)
+def _is_book_move(move_number, eval_before):
+    if eval_before is None:
+        return False
+    return move_number <= 10 and abs(eval_before) <= 30
 
-    screen.blit(font.render("Undo",True,(255,255,255)),(undo_btn.x+10,undo_btn.y+5))
-    screen.blit(font.render("Redo",True,(255,255,255)),(redo_btn.x+10,redo_btn.y+5))
+def _payload(with_sf=False):
+    return {
+        "board":          engine.board,
+        "current_turn":   engine.current_turn,
+        "eval_engine":    _engine_eval(),
+        "eval_sf":        _sf_eval() if with_sf else None,
+        "can_undo":       len(_undo_stack) > 0,
+        "can_redo":       len(_redo_stack) > 0,
+        "stockfish_ok":   STOCKFISH_OK,
+        **_game_status(),
+    }
 
+def _reset_globals():
+    global _fullmove_counter
+    engine.board[:] = [
+        ["r","n","b","q","k","b","n","r"],
+        ["p","p","p","p","p","p","p","p"],
+        [".",".",".",".",".",".",".","."],
+        [".",".",".",".",".",".",".","."],
+        [".",".",".",".",".",".",".","."],
+        [".",".",".",".",".",".",".","."],
+        ["P","P","P","P","P","P","P","P"],
+        ["R","N","B","Q","K","B","N","R"],
+    ]
+    engine.current_turn        = "white"
+    engine.white_king_moved    = False
+    engine.black_king_moved    = False
+    engine.white_rook_a_moved  = False
+    engine.white_rook_h_moved  = False
+    engine.black_rook_a_moved  = False
+    engine.black_rook_h_moved  = False
+    engine.en_passant_target   = None
+    engine.halfmove_clock      = 0
+    engine.position_history.clear()
+    engine.transposition_table.clear()
+    engine.history_heuristic.clear()
+    engine.principal_variation_move = None
+    engine.killer_moves = [[None, None] for _ in range(50)]
+    engine.position_history[engine.hash_board(engine.board, engine.current_turn)] = 1
+    _fullmove_counter = 1
 
-########################################
-def draw_turn():
-    font = pygame.font.SysFont(None,24)
-    turn_text = "White to move" if engine.current_turn=="white" else "Black to move"
-    screen.blit(font.render(turn_text,True,(255,255,255)),(520,30))
+def _best_move_from_snap(s):
+    saved = _snap()
+    _restore(s)
+    try:
+        moves = engine.generate_all_legal_moves(engine.board, engine.current_turn)
+        if not moves:
+            return None
+        result = engine.iterative_deepening(engine.board, engine.ENGINE_DEPTH)
+        if not result or not result[0]:
+            return None
+        best, _ = result
+        return best[0] + best[1]
+    except Exception:
+        return None
+    finally:
+        _restore(saved)
 
-########################################
-def draw_game_over():
-    if not game_over:
-        return
-    font=pygame.font.SysFont(None,40)
-    s=pygame.Surface((BOARD_SIZE,BOARD_SIZE),pygame.SRCALPHA)
-    s.fill((0,0,0,180))
-    screen.blit(s,(0,0))
-    text=font.render(game_result,True,(255,255,255))
-    screen.blit(text,(120,220))
+def _build_move_review_entry(pre_snap, played_uci, move_number):
+    saved = _snap()
+    try:
+        _restore(pre_snap)
+        fen_before   = _fen()
+        moving_color = engine.current_turn
+        eval_before  = _sf_eval_at_fen(fen_before)
+        best_uci, best_eval = _sf_best_move_and_eval(fen_before)
 
-########################################
-def draw_panel():
-    pygame.draw.rect(screen,PANEL,(512,0,188,HEIGHT))
-    draw_eval()
-    draw_buttons()
-    draw_turn()
-    draw_history()
-    draw_settings()
-    draw_engine_info()
+        own_material_before = _material_score(engine.board, moving_color)
+        temp_board          = copy.deepcopy(engine.board)
+        temp_fr, temp_fc    = engine.notation_to_index(played_uci[:2])
+        temp_tr, temp_tc    = engine.notation_to_index(played_uci[2:4])
+        _p = temp_board[temp_fr][temp_fc]
+        temp_board[temp_tr][temp_tc] = _p
+        temp_board[temp_fr][temp_fc] = "."
+        sacrificed_material = max(0, own_material_before - _material_score(temp_board, moving_color))
 
-########################################
+        engine.move_piece_notation(engine.board, played_uci[:2], played_uci[2:4])
+        eval_after = _sf_eval_at_fen(_fen())
+
+        classification = _classify_move(eval_before, best_eval, eval_after, moving_color, sacrificed_material)
+        if classification not in ("Brilliant", "Best") and _is_book_move(move_number, eval_before):
+            classification = "Book"
+
+        return {
+            "move_number":         move_number,
+            "played":              played_uci,
+            "best":                best_uci,
+            "eval_before":         round(eval_before / 100, 2) if eval_before is not None else None,
+            "eval_after":          round(eval_after  / 100, 2) if eval_after  is not None else None,
+            "best_eval":           round(best_eval   / 100, 2) if best_eval   is not None else None,
+            "classification":      classification,
+            "moving_color":        moving_color,
+            "sacrificed_material": sacrificed_material,
+            "eval_before_cp":      eval_before,
+            "eval_after_cp":       eval_after,
+            "best_eval_cp":        best_eval,
+        }
+    except Exception:
+        return {
+            "move_number":         move_number,
+            "played":              played_uci,
+            "best":                None,
+            "eval_before":         None,
+            "eval_after":          None,
+            "best_eval":           None,
+            "classification":      None,
+            "moving_color":        engine.current_turn,
+            "sacrificed_material": 0,
+            "eval_before_cp":      None,
+            "eval_after_cp":       None,
+            "best_eval_cp":        None,
+        }
+    finally:
+        _restore(saved)
+
+def _history_for_client():
+    return [
+        {
+            "move":           e.get("played"),
+            "best":           e.get("best"),
+            "eval_before":    e.get("eval_before"),
+            "eval_after":     e.get("eval_after"),
+            "best_eval":      e.get("best_eval"),
+            "classification": e.get("classification"),
+            "moving_color":   e.get("moving_color", "white"),
+            "eval_before_cp": e.get("eval_before_cp"),
+            "eval_after_cp":  e.get("eval_after_cp"),
+            "best_eval_cp":   e.get("best_eval_cp"),
+        }
+        for e in _move_history
+    ]
+
+def _review_payload(review, played_uci):
+    return {
+        "move":           played_uci,
+        "best":           review["best"],
+        "eval_before":    review["eval_before"],
+        "eval_after":     review["eval_after"],
+        "best_eval":      review["best_eval"],
+        "classification": review["classification"],
+        "moving_color":   review["moving_color"],
+        "eval_before_cp": review["eval_before_cp"],
+        "eval_after_cp":  review["eval_after_cp"],
+        "best_eval_cp":   review["best_eval_cp"],
+    }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ROUTES
+# ─────────────────────────────────────────────────────────────────────────────
+@app.route("/")
+def home():
+    return render_template("index.html")
+
+@app.get("/state")
+def get_state():
+    return jsonify(_payload(with_sf=False))
+
+@app.get("/eval")
+def get_eval():
+    return jsonify({"eval_engine": _engine_eval(), "eval_sf": _sf_eval()})
+
+@app.get("/moves")
+def legal_moves():
+    sq    = request.args.get("square")
+    moves = engine.generate_all_legal_moves(engine.board, engine.current_turn)
+    if sq:
+        moves = [m for m in moves if m[0] == sq]
+    return jsonify({"turn": engine.current_turn, "moves": [{"from": f, "to": t} for f, t in moves]})
+
+@app.get("/fen")
+def get_fen():
+    return jsonify({"fen": _fen()})
+
+@app.get("/best_move")
+def best_move_hint():
+    try:
+        moves = engine.generate_all_legal_moves(engine.board, engine.current_turn)
+        if not moves:
+            return jsonify({"error": "no legal moves"}), 400
+        result = engine.iterative_deepening(engine.board, engine.ENGINE_DEPTH)
+        if not result:
+            return jsonify({"error": "no move found"}), 500
+        best, score = result
+        return jsonify({"from": best[0], "to": best[1], "score": score})
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
+
+@app.get("/bestmove/current")
+def bestmove_current():
+    try:
+        moves = engine.generate_all_legal_moves(engine.board, engine.current_turn)
+        if not moves:
+            return jsonify({"engine": None, "stockfish": None})
+        eng_best = None
+        try:
+            result = engine.iterative_deepening(engine.board, engine.ENGINE_DEPTH)
+            if result and result[0]:
+                eng_best = result[0][0] + result[0][1]
+        except Exception:
+            pass
+        return jsonify({"engine": eng_best, "stockfish": _sf_best_move_from_fen(_fen())})
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
+
+@app.get("/bestmove/played")
+def bestmove_played():
+    try:
+        if not _move_history:
+            return jsonify({"played": None, "best_engine": None, "best_sf": None, "move_number": 0})
+        last    = _move_history[-1]
+        snap    = last["snap"]
+        best_eng = _best_move_from_snap(snap)
+        saved = _snap(); _restore(snap); fen_before = _fen(); _restore(saved)
+        return jsonify({
+            "played":      last["played"],
+            "best_engine": best_eng,
+            "best_sf":     _sf_best_move_from_fen(fen_before),
+            "move_number": last["move_number"],
+        })
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
+
+@app.get("/review")
+def get_review():
+    try:
+        n_param = request.args.get("n")
+        entries = _move_history if not n_param else _move_history[-int(n_param):]
+        return jsonify([
+            {
+                "move_number":    e["move_number"],
+                "played":         e["played"],
+                "best":           e.get("best"),
+                "eval_before":    e.get("eval_before"),
+                "eval_after":     e.get("eval_after"),
+                "best_eval":      e.get("best_eval"),
+                "classification": e.get("classification"),
+                "moving_color":   e.get("moving_color", "white"),
+            }
+            for e in entries
+        ])
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
+
+# ── Move endpoints ────────────────────────────────────────────────────────────
+
+@app.post("/move/human")
+def human_move():
+    global _fullmove_counter
+    d  = request.get_json(force=True)
+    fr = d.get("from", "")
+    to = d.get("to",   "")
+    if not fr or not to:
+        return jsonify({"error": "need from+to"}), 400
+
+    r1, c1 = engine.notation_to_index(fr)
+    piece  = engine.board[r1][c1]
+    if piece == ".":
+        return jsonify({"error": "no piece on source square"}), 400
+    if engine.current_turn == "white" and piece.islower():
+        return jsonify({"error": "it is white's turn"}), 400
+    if engine.current_turn == "black" and piece.isupper():
+        return jsonify({"error": "it is black's turn"}), 400
+    r2, c2 = engine.notation_to_index(to)
+    if not engine.is_valid_move(engine.board, r1, c1, r2, c2, piece):
+        return jsonify({"error": "invalid move"}), 400
+    if engine.move_puts_own_king_in_check(engine.board, r1, c1, r2, c2, piece):
+        return jsonify({"error": "move leaves king in check"}), 400
+
+    pre_snap    = _snap()
+    move_number = len(_move_history) + 1
+    played_uci  = fr + to
+    review      = _build_move_review_entry(pre_snap, played_uci, move_number)
+
+    _undo_stack.append(_snap_full())
+    _redo_stack.clear()
+    engine.move_piece_notation(engine.board, fr, to)
+    if engine.current_turn == "white":
+        _fullmove_counter += 1
+
+    entry = dict(review); entry["snap"] = pre_snap
+    _move_history.append(entry)
+
+    payload = _payload(with_sf=True)
+    payload["eval_before_sf"]     = review["eval_before_cp"]
+    payload["eval_before_engine"] = _engine_eval()
+    payload["move_from"]          = fr
+    payload["move_to"]            = to
+    payload["review"]             = _review_payload(review, played_uci)
+    return jsonify(payload)
+
+@app.post("/move/engine")
 def engine_move():
-    global eval_score,pv_line,last_move,game_over,game_result
-    global engine_depth,engine_thinking
-
-    pygame.display.flip()
-    time.sleep(0.2)
-
-    engine_thinking=True
-    pygame.display.flip()
-
-    best,score=engine.iterative_deepening(engine.board,engine.ENGINE_DEPTH)
-
-    engine_thinking=False
-    engine_depth=engine.ENGINE_DEPTH
-    eval_score=score
-
-    if best:
-        fr,fc=engine.notation_to_index(best[0])
-        tr,tc=engine.notation_to_index(best[1])
-
-        piece=engine.board[fr][fc]
-        key=("w" if piece.isupper() else "b")+piece.lower()
-
-        animate(fr,fc,tr,tc,key)
-
-        undo_stack.append((copy.deepcopy(engine.board),move_log.copy()))
-
-        engine.move_piece_notation(engine.board,best[0],best[1])
-        move_log.append(best[0]+best[1])
-
-        if sound_on:
-            move_sound.play()
-
-        last_move=((fr,fc),(tr,tc))
-        arrows.clear()   # ✅ CLEAR AFTER MOVE
-
-        pv_line=best[0]+best[1]
-
-        update_eval()
-
-        if engine.is_checkmate(engine.board,engine.current_turn):
-            game_over=True
-            game_result="Checkmate!"
-        elif engine.is_stalemate(engine.board,engine.current_turn):
-            game_over=True
-            game_result="Stalemate!"
-
-########################################
-def main():
-    global dragging,drag_piece,drag_from
-    global mouse_x,mouse_y,hover_square
-    global selected_square,legal_moves
-    global eval_score,pv_line,click_start,last_move,display_score
-    global game_over
-    global arrow_start,preview_arrow
-    global capture_anim
-    global sound_on,show_highlights
-    global promotion_mode,promotion_square
-    global mouse_pos
-
-    load_images()
-    running=True
-
-    while running:
-
-        for event in pygame.event.get():
-
-            if event.type==pygame.QUIT:
-                running=False
-
-            if event.type==pygame.KEYDOWN:
-                if event.key==pygame.K_s:
-                    sound_on = not sound_on
-                if event.key==pygame.K_h:
-                    show_highlights = not show_highlights
-
-            if event.type==pygame.MOUSEBUTTONDOWN:
-                if promotion_mode:
-                    mx,my = event.pos
-                    r,c = promotion_square
-
-                    for i,p in enumerate(promotion_choices):
-                        rect = pygame.Rect(c*SQ_SIZE, r*SQ_SIZE+i*SQ_SIZE, SQ_SIZE, SQ_SIZE)
-                        if rect.collidepoint(mx,my):
-                            piece = engine.board[r][c]
-                            engine.board[r][c] = p if piece.isupper() else p.lower()
-                            promotion_mode=False
-                    continue
-
-                if event.button == 3:
-                    col=event.pos[0]//SQ_SIZE
-                    row=event.pos[1]//SQ_SIZE
-                    arrow_start=(row,col)
-
-                elif restart_btn.collidepoint(event.pos):
-                    engine.board = engine.get_initial_board()
-                    engine.current_turn = "white"
-
-                    move_log.clear()
-                    undo_stack.clear()
-                    redo_stack.clear()
-
-                    selected_square=None
-                    legal_moves.clear()
-                    arrows.clear()
-
-                    game_over=False
-                    game_result=""
-
-                    update_eval()
-
-                    last_move=None
-                    promotion_mode=False
-                    capture_anim=None
-                    pv_line=""
-                    engine_depth=0
-                    engine_thinking=False
-                    display_score=0
-                    hover_square=None
-                    arrow_start=None
-                    preview_arrow=None
-
-
-                elif undo_btn.collidepoint(event.pos):
-                    if undo_stack:
-                        redo_stack.append((copy.deepcopy(engine.board),move_log.copy()))
-                        engine.board,move_log[:] = undo_stack.pop()
-                        engine.current_turn = "white" if len(move_log)%2==0 else "black"
-                        update_eval()
-
-                elif redo_btn.collidepoint(event.pos):
-                    if redo_stack:
-                        undo_stack.append((copy.deepcopy(engine.board),move_log.copy()))
-                        engine.board,move_log[:] = redo_stack.pop()
-                        engine.current_turn = "white" if len(move_log)%2==0 else "black"
-                        update_eval()
-
-                else:
-                    col=event.pos[0]//SQ_SIZE
-                    row=event.pos[1]//SQ_SIZE
-
-                    if 0<=row<8 and 0<=col<8:
-                        piece=engine.board[row][col]
-
-                        if selected_square and (row,col) in [(m[0],m[1]) for m in legal_moves]:
-
-                            target_piece = engine.board[row][col]
-                            if target_piece != ".":
-                                capture_anim = (row,col,120)
-
-                            undo_stack.append((copy.deepcopy(engine.board),move_log.copy()))
-
-                            fs=engine.index_to_notation(selected_square[0],selected_square[1])
-                            ts=engine.index_to_notation(row,col)
-
-                            engine.move_piece_notation(engine.board,fs,ts)
-                            move_log.append(fs+ts)
-
-                            if sound_on:
-                                move_sound.play()
-
-                            last_move=((selected_square[0],selected_square[1]),(row,col))
-                            arrows.clear()   # ✅ CLEAR AFTER MOVE
-
-                            piece = engine.board[row][col]
-                            if piece.upper()=="P" and (row==0 or row==7):
-                                promotion_mode=True
-                                promotion_square=(row,col)
-
-                            selected_square=None
-                            legal_moves=[]
-
-                            update_eval()
-
-                            if engine.current_turn=="black":
-                                engine_move()
-
-                        elif piece!="." and piece.isupper():
-                            selected_square=(row,col)
-                            legal_moves=get_legal_moves(row,col)
-
-                            drag_from=(row,col)
-                            drag_piece="w"+piece.lower()
-                            click_start=event.pos
-                        else:
-                            selected_square=None
-                            legal_moves=[]
-
-            if event.type==pygame.MOUSEMOTION:
-                mouse_pos = event.pos
-                mouse_x,mouse_y=event.pos
-
-                col = mouse_x // SQ_SIZE
-                row = mouse_y // SQ_SIZE
-
-                if 0 <= row < 8 and 0 <= col < 8:
-                    hover_square = (row, col)
-                else:
-                    hover_square = None
-
-                if arrow_start:
-                    preview_arrow=(arrow_start,(row,col))
-
-                if drag_piece and click_start:
-                    if (abs(mouse_x-click_start[0])>drag_threshold or 
-                        abs(mouse_y-click_start[1])>drag_threshold):
-                        dragging=True
-
-            if event.type==pygame.MOUSEBUTTONUP:
-
-                if event.button == 3 and arrow_start:
-                    col=event.pos[0]//SQ_SIZE
-                    row=event.pos[1]//SQ_SIZE
-                    arrows.append((arrow_start,(row,col)))
-                    arrow_start=None
-                    preview_arrow=None
-
-                if dragging:
-                    col=event.pos[0]//SQ_SIZE
-                    row=event.pos[1]//SQ_SIZE
-
-                    if not (0<=row<8 and 0<=col<8):
-                        dragging=False
-                        drag_piece=None
-                        drag_from=None
-                        click_start=None
-                        continue
-
-                    if (row,col) in [(m[0],m[1]) for m in legal_moves]:
-
-                        target_piece = engine.board[row][col]
-                        if target_piece != ".":
-                            capture_anim = (row,col,120)
-
-                        undo_stack.append((copy.deepcopy(engine.board),move_log.copy()))
-
-                        fs=engine.index_to_notation(drag_from[0],drag_from[1])
-                        ts=engine.index_to_notation(row,col)
-
-                        engine.move_piece_notation(engine.board,fs,ts)
-                        move_log.append(fs+ts)
-
-                        if sound_on:
-                            move_sound.play()
-
-                        last_move=((drag_from[0],drag_from[1]),(row,col))
-                        arrows.clear()   # ✅ CLEAR AFTER MOVE
-
-                        piece = engine.board[row][col]
-                        if piece.upper()=="P" and (row==0 or row==7):
-                            promotion_mode=True
-                            promotion_square=(row,col)
-
-                        selected_square=None
-                        legal_moves=[]
-
-                        update_eval()
-
-                        if engine.current_turn=="black":
-                            engine_move()
-
-                dragging=False
-                drag_piece=None
-                drag_from=None
-                click_start=None
-
-        screen.fill(BG)
-
-        draw_board()
-        draw_hover()
-        draw_last_move()
-        draw_arrows()
-        draw_selected()
-        draw_highlights()
-        draw_check()
-        draw_pieces()
-        draw_capture_anim()
-        draw_drag_piece()
-        draw_panel()
-        draw_game_over()
-        draw_promotion()
-
-        pygame.display.flip()
-
-if __name__=="__main__":
-    main()
+    global _fullmove_counter
+    d     = request.get_json(force=True, silent=True) or {}
+    depth = int(d.get("depth", engine.ENGINE_DEPTH))
+    if not engine.generate_all_legal_moves(engine.board, engine.current_turn):
+        return jsonify({"error": "no legal moves"}), 400
+
+    result = engine.iterative_deepening(engine.board, depth)
+    if not result:
+        return jsonify({"error": "engine found no move"}), 500
+    best, _ = result
+    fr, to  = best
+    played_uci = fr + to
+
+    pre_snap    = _snap()
+    move_number = len(_move_history) + 1
+    review      = _build_move_review_entry(pre_snap, played_uci, move_number)
+
+    _undo_stack.append(_snap_full())
+    _redo_stack.clear()
+    engine.move_piece_notation(engine.board, fr, to)
+    if engine.current_turn == "white":
+        _fullmove_counter += 1
+
+    entry = dict(review); entry["snap"] = pre_snap
+    _move_history.append(entry)
+
+    payload = {"engine_move": {"from": fr, "to": to}, **_payload(with_sf=True)}
+    payload["eval_before_sf"]     = review["eval_before_cp"]
+    payload["eval_before_engine"] = _engine_eval()
+    payload["move_from"]          = fr
+    payload["move_to"]            = to
+    payload["review"]             = _review_payload(review, played_uci)
+    return jsonify(payload)
+
+@app.post("/move/stockfish")
+def sf_move():
+    global _fullmove_counter
+    if not STOCKFISH_OK or _sf is None:
+        return jsonify({"error": f"Stockfish not available: {STOCKFISH_ERR}"}), 501
+    if not engine.generate_all_legal_moves(engine.board, engine.current_turn):
+        return jsonify({"error": "no legal moves"}), 400
+    try:
+        fen_str = _fen()
+        with _sf_lock:
+            _sf.set_fen_position(fen_str)
+            uci = _sf.get_best_move()
+        if not uci or len(uci) < 4:
+            return jsonify({"error": "Stockfish returned no move"}), 500
+
+        fr, to  = uci[0:2], uci[2:4]
+        r1, c1  = engine.notation_to_index(fr)
+        r2, c2  = engine.notation_to_index(to)
+        piece   = engine.board[r1][c1]
+        if piece == ".":
+            return jsonify({"error": f"Stockfish picked empty square {fr}"}), 500
+
+        played_uci  = fr + to
+        pre_snap    = _snap()
+        move_number = len(_move_history) + 1
+        review      = _build_move_review_entry(pre_snap, played_uci, move_number)
+
+        _undo_stack.append(_snap_full())
+        _redo_stack.clear()
+        engine.move_piece_notation(engine.board, fr, to)
+        if len(uci) == 5:
+            promo = uci[4].upper()
+            engine.board[r2][c2] = promo if engine.current_turn == "black" else promo.lower()
+        if engine.current_turn == "white":
+            _fullmove_counter += 1
+
+        entry = dict(review); entry["snap"] = pre_snap
+        _move_history.append(entry)
+
+        payload = {"engine_move": {"from": fr, "to": to}, **_payload(with_sf=True)}
+        payload["eval_before_sf"]     = review["eval_before_cp"]
+        payload["eval_before_engine"] = _engine_eval()
+        payload["move_from"]          = fr
+        payload["move_to"]            = to
+        payload["review"]             = _review_payload(review, played_uci)
+        return jsonify(payload)
+    except Exception as ex:
+        log.error("[sf_move] %s", traceback.format_exc())
+        return jsonify({"error": f"Stockfish error: {str(ex)}"}), 500
+
+# ── Undo / Redo / Reset ───────────────────────────────────────────────────────
+
+@app.post("/undo")
+def undo():
+    if not _undo_stack:
+        return jsonify({"error": "nothing to undo"}), 400
+    _redo_stack.append(_snap_full())
+    _restore_full(_undo_stack.pop())
+    payload = _payload(with_sf=False)
+    payload["move_history"] = _history_for_client()
+    return jsonify(payload)
+
+@app.post("/redo")
+def redo():
+    if not _redo_stack:
+        return jsonify({"error": "nothing to redo"}), 400
+    _undo_stack.append(_snap_full())
+    _restore_full(_redo_stack.pop())
+    payload = _payload(with_sf=False)
+    payload["move_history"] = _history_for_client()
+    return jsonify(payload)
+
+@app.post("/reset")
+def reset():
+    _reset_globals()
+    _undo_stack.clear()
+    _redo_stack.clear()
+    _move_history.clear()
+    return jsonify(_payload(with_sf=False))
+
+# ── Eval history + Accuracy ───────────────────────────────────────────────────
+
+@app.get("/eval_history")
+def eval_history():
+    return jsonify([
+        round(e["eval_after"], 2) if e.get("eval_after") is not None else None
+        for e in _move_history
+    ])
+
+def _compute_side_stats(moves):
+    scores = []
+    blunders = mistakes = inaccuracies = brilliants = 0
+    for e in moves:
+        cl = e.get("classification")
+        if   cl == "Blunder":    blunders     += 1
+        elif cl == "Mistake":    mistakes     += 1
+        elif cl == "Inaccuracy": inaccuracies += 1
+        elif cl == "Brilliant":  brilliants   += 1
+        b, a = e.get("best_eval_cp"), e.get("eval_after_cp")
+        if b is not None and a is not None:
+            sign  = 1 if e.get("moving_color", "white") == "white" else -1
+            delta = max(0, sign * (b - a))
+            scores.append(max(0.0, 100.0 - delta / 10.0))
+    return {
+        "accuracy":     round(sum(scores) / len(scores)) if scores else 100,
+        "blunders":     blunders,
+        "mistakes":     mistakes,
+        "inaccuracies": inaccuracies,
+        "brilliants":   brilliants,
+        "moves_scored": len(scores),
+    }
+
+@app.get("/accuracy")
+def get_accuracy():
+    white_moves = [e for e in _move_history if e.get("moving_color") == "white"]
+    black_moves = [e for e in _move_history if e.get("moving_color") == "black"]
+    overall = _compute_side_stats(_move_history)
+    return jsonify({
+        **{k: overall[k] for k in ("accuracy","blunders","mistakes","inaccuracies","brilliants","moves_scored")},
+        "white": _compute_side_stats(white_moves),
+        "black": _compute_side_stats(black_moves),
+    })
+
+# ── Save game ─────────────────────────────────────────────────────────────────
+
+@app.post("/save_game")
+def save_game():
+    try:
+        body   = request.get_json(force=True, silent=True) or {}
+        record = {
+            "date":     body.get("date") or datetime.datetime.utcnow().isoformat() + "Z",
+            "result":   body.get("result", "?"),
+            "moves":    body.get("moves", []),
+            "accuracy": body.get("accuracy", {}),
+            "review": [
+                {
+                    "move":           e.get("played"),
+                    "best":           e.get("best"),
+                    "eval_before":    e.get("eval_before"),
+                    "eval_after":     e.get("eval_after"),
+                    "best_eval":      e.get("best_eval"),
+                    "classification": e.get("classification"),
+                    "moving_color":   e.get("moving_color"),
+                }
+                for e in _move_history
+            ],
+        }
+        games = []
+        try:
+            with open(_SAVE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    games = data
+        except (OSError, json.JSONDecodeError):
+            games = []
+
+        games.append(record)
+        try:
+            with open(_SAVE_PATH, "w", encoding="utf-8") as f:
+                json.dump(games, f, indent=2, ensure_ascii=False)
+        except OSError:
+            log.warning("[save_game] Could not write %s — ephemeral storage?", _SAVE_PATH)
+
+        return jsonify({"saved": True, "total_games": len(games)})
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
+
+# ── Debug endpoint ────────────────────────────────────────────────────────────
+
+@app.get("/debug")
+def debug():
+    return jsonify({
+        "stockfish_ok":     STOCKFISH_OK,
+        "stockfish_error":  STOCKFISH_ERR,
+        "stockfish_path":   _SF_PATH,
+        "save_path":        _SAVE_PATH,
+        "sounds_dir":       _SOUNDS_DIR,
+        "cwd":              os.getcwd(),
+        "move_history_len": len(_move_history),
+        "fullmove_counter": _fullmove_counter,
+    })
+
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    app.run(debug=False)

@@ -2,11 +2,34 @@
 Chess Engine — Flask Backend
 python app.py
 """
-import copy, traceback, os
+
+import copy, traceback, os, json, datetime, threading
 from flask import Flask, jsonify, request, render_template, send_from_directory
 import engine
+import logging
+logging.basicConfig(level=logging.WARNING)
+log = logging.getLogger(__name__)
+
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+SF_PATH = os.path.join(PROJECT_DIR, "stockfish", "stockfish")
+
+
+
+def _ensure_save_file():
+    path = os.path.join(PROJECT_DIR, "saved_games.json")
+    if not os.path.exists(path):
+        try:
+            with open(path, "w") as f:
+                json.dump([], f)
+        except OSError:
+            pass
+
+_ensure_save_file()
 
 app = Flask(__name__)
+
+# ── Mate sentinel constant ─────────────────────────────────────────────────────
+MATE_SCORE = -999.99
 
 # ── Serve sounds from project-root sounds/ folder ─────────────────────────────
 @app.route('/sounds/<path:filename>')
@@ -16,20 +39,27 @@ def serve_sound(filename):
 
 # ── Stockfish init ─────────────────────────────────────────────────────────────
 _sf           = None
+_sf_lock      = threading.Lock()
 STOCKFISH_OK  = False
 STOCKFISH_ERR = ""
 
 def _init_stockfish():
     global _sf, STOCKFISH_OK, STOCKFISH_ERR
-    project_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates  = [
-        os.path.join(project_dir, 'stockfish.exe'),
-        os.path.join(project_dir, 'stockfish'),
-        r'stockfish.exe',
-        r'stockfish',
-    ]
+    project_dir = PROJECT_DIR
+
+    # Linux-first candidate list — Windows .exe paths removed
+    candidates = [
+    SF_PATH,
+    os.path.join(PROJECT_DIR, 'stockfish'),
+]
+
     for path in candidates:
-        if not os.path.exists(path) and path not in ('stockfish.exe', 'stockfish'):
+        if not os.path.exists(path):
+            log.error(f"[Stockfish] binary not found at: {path}")
+            continue
+        if not os.access(path, os.X_OK):
+            log.error(f"[Stockfish] binary exists but is not executable: {path}")
+            log.error(f"[Stockfish] run: chmod +x {path}")
             continue
         try:
             from stockfish import Stockfish
@@ -40,12 +70,15 @@ def _init_stockfish():
             if move:
                 _sf = sf
                 STOCKFISH_OK = True
-                print(f"[Stockfish] OK — path={path}, test move={move}")
+                log.info(f"[Stockfish] OK — path={path}, test move={move}")
                 return
         except Exception as e:
             STOCKFISH_ERR = str(e)
-            print(f"[Stockfish] failed path={path}: {e}")
-    print(f"[Stockfish] NOT available. Last error: {STOCKFISH_ERR}")
+            log.error(f"[Stockfish] failed path={path}: {e}")
+
+    log.error(f"[Stockfish] NOT available. Last error: {STOCKFISH_ERR}")
+    log.info("[Stockfish] Place the Linux binary at: stockfish/stockfish")
+    log.info("[Stockfish] Download from: https://stockfishchess.org/download/")
 
 _init_stockfish()
 
@@ -67,6 +100,9 @@ _redo_stack = []
 #   best_eval    : int|None  — Stockfish eval AFTER the best move (white-positive)
 #   moving_color : str   — 'white' | 'black'
 _move_history = []
+
+# ── Fullmove counter (increments after Black's move, resets on new game) ──────
+_fullmove_counter = 1
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
@@ -191,7 +227,7 @@ def _fen():
     ca = ca or "-"
     ep = engine.index_to_notation(*engine.en_passant_target) \
          if engine.en_passant_target else "-"
-    return f"{'/'.join(rows)} {t} {ca} {ep} {engine.halfmove_clock} 1"
+    return f"{'/'.join(rows)} {t} {ca} {ep} {engine.halfmove_clock} {_fullmove_counter}"
 
 def _sf_eval_at_fen(fen_str):
     """
@@ -201,8 +237,9 @@ def _sf_eval_at_fen(fen_str):
     if not STOCKFISH_OK or _sf is None:
         return None
     try:
-        _sf.set_fen_position(fen_str)
-        info = _sf.get_evaluation()
+        with _sf_lock:
+            _sf.set_fen_position(fen_str)
+            info = _sf.get_evaluation()
         if not info:
             return None
         # Determine whose turn it is from FEN
@@ -219,7 +256,7 @@ def _sf_eval_at_fen(fen_str):
                 sign = -sign
             return sign * 99999
     except Exception as ex:
-        print(f"[SF eval_at_fen error] {ex}")
+        log.warning(f"[SF eval_at_fen error] {ex}")
     return None
 
 def _sf_eval():
@@ -236,50 +273,38 @@ def _sf_best_move_and_eval(fen_str):
     if not STOCKFISH_OK or _sf is None:
         return None, None
     try:
-        _sf.set_fen_position(fen_str)
-        best_uci = _sf.get_best_move()
-        if not best_uci or len(best_uci) < 4:
-            return None, None
-
-        # Now get eval after playing best move — apply it and evaluate
-        # We do this by making a copy of the board state, applying the best move,
-        # then asking SF to evaluate the resulting position.
-        # The cleanest way is to use SF's own evaluation of the position after best move.
-        # We can do this by setting the position with the best move played.
-        try:
+        with _sf_lock:
             _sf.set_fen_position(fen_str)
-            # Use make_moves_from_current_position to apply the best move
-            _sf.make_moves_from_current_position([best_uci])
-            info = _sf.get_evaluation()
-            if info:
-                side = fen_str.split()[1] if ' ' in fen_str else 'w'
-                # After best move, it's the opponent's turn — SF eval is from their view
-                # We want white-positive, so negate if side was white (now black to move after)
-                # More precisely: after white's best move, black to move → SF gives black's view → negate
-                if info["type"] == "cp":
-                    cp = info["value"]
-                    # The position after best move: opponent is now to move
-                    # SF returns eval from the NEW side-to-move perspective
-                    # opponent of original side:
-                    if side == 'w':
-                        cp = -cp   # white moved, black to move → SF gives black's cp → negate for white-positive
-                    # if side == 'b': black moved, white to move → SF gives white's cp → keep as is
-                    best_eval = cp
-                elif info["type"] == "mate":
-                    sign = 1 if info["value"] > 0 else -1
-                    if side == 'w':
-                        sign = -sign
-                    best_eval = sign * 99999
-                else:
-                    best_eval = None
-            else:
-                best_eval = None
-        except Exception:
+            best_uci = _sf.get_best_move()
+            if not best_uci or len(best_uci) < 4:
+                return None, None
+
             best_eval = None
+            try:
+                _sf.set_fen_position(fen_str)
+                # Use make_moves_from_current_position to apply the best move
+                _sf.make_moves_from_current_position([best_uci])
+                info = _sf.get_evaluation()
+                if info:
+                    side = fen_str.split()[1] if ' ' in fen_str else 'w'
+                    # After best move, it's the opponent's turn — SF eval is from their view
+                    # We want white-positive, so negate if side was white (now black to move after)
+                    if info["type"] == "cp":
+                        cp = info["value"]
+                        if side == 'w':
+                            cp = -cp
+                        best_eval = cp
+                    elif info["type"] == "mate":
+                        sign = 1 if info["value"] > 0 else -1
+                        if side == 'w':
+                            sign = -sign
+                        best_eval = sign * 99999
+            except Exception:
+                best_eval = None
 
         return best_uci[:4], best_eval
     except Exception as ex:
-        print(f"[SF best_move_and_eval error] {ex}")
+        log.error(f"[SF best_move_and_eval error] {ex}")
     return None, None
 
 def _sf_best_move_from_fen(fen_str):
@@ -287,12 +312,13 @@ def _sf_best_move_from_fen(fen_str):
     if not STOCKFISH_OK or _sf is None:
         return None
     try:
-        _sf.set_fen_position(fen_str)
-        uci = _sf.get_best_move()
+        with _sf_lock:
+            _sf.set_fen_position(fen_str)
+            uci = _sf.get_best_move()
         if uci and len(uci) >= 4:
             return uci[:4]
     except Exception as ex:
-        print(f"[sf_best_move_from_fen error] {ex}")
+        log.error(f"[sf_best_move_from_fen error] {ex}")
     return None
 
 def _classify_move(eval_before, best_eval, eval_after, moving_color, sacrificed_material=0):
@@ -368,6 +394,7 @@ def _payload(with_sf=False):
     }
 
 def _reset_globals():
+    global _fullmove_counter
     engine.board[:] = [
         ["r","n","b","q","k","b","n","r"],
         ["p","p","p","p","p","p","p","p"],
@@ -393,6 +420,7 @@ def _reset_globals():
     engine.principal_variation_move = None
     engine.killer_moves = [[None, None] for _ in range(50)]
     engine.position_history[engine.hash_board(engine.board, engine.current_turn)] = 1
+    _fullmove_counter = 1
 
 def _best_move_from_snap(s):
     """Temporarily restore snap, run engine search, restore back."""
@@ -408,7 +436,7 @@ def _best_move_from_snap(s):
         best, _ = result
         return best[0] + best[1]
     except Exception as ex:
-        print(f"[best_move_from_snap error] {ex}")
+        log.error(f"[best_move_from_snap error] {ex}")
         return None
     finally:
         _restore(saved)
@@ -431,15 +459,21 @@ def _build_move_review_entry(pre_snap, played_uci, move_number):
         # Record own material BEFORE the move
         own_material_before = _material_score(engine.board, moving_color)
 
-        # Apply the played move to measure material afterwards
-        engine.move_piece_notation(engine.board, played_uci[:2], played_uci[2:4])
+        # Use a board copy for material counting — keeps global state clean
+        # until eval_after needs the full FEN after the real move
+        temp_board = copy.deepcopy(engine.board)
+        temp_fr, temp_fc = engine.notation_to_index(played_uci[:2])
+        temp_tr, temp_tc = engine.notation_to_index(played_uci[2:4])
+        _p = temp_board[temp_fr][temp_fc]
+        temp_board[temp_tr][temp_tc] = _p
+        temp_board[temp_fr][temp_fc] = "."
 
-        # Own material AFTER the move (may have lost pieces in a sacrifice)
-        own_material_after = _material_score(engine.board, moving_color)
-
-        # sacrificed_material > 0 means the player gave up their own material
+        own_material_after  = _material_score(temp_board, moving_color)
         sacrificed_material = max(0, own_material_before - own_material_after)
 
+        # For eval_after we need the real FEN — apply move on global board
+        # (finally block will restore it regardless of what happens next)
+        engine.move_piece_notation(engine.board, played_uci[:2], played_uci[2:4])
         eval_after = _sf_eval_at_fen(_fen())
 
         classification = _classify_move(
@@ -468,7 +502,7 @@ def _build_move_review_entry(pre_snap, played_uci, move_number):
             "best_eval_cp":       best_eval,
         }
     except Exception as ex:
-        print(f"[build_move_review_entry error] {ex}")
+        log.error(f"[build_move_review_entry error] {ex}")
         return {
             "move_number":        move_number,
             "played":             played_uci,
@@ -551,12 +585,12 @@ def bestmove_current():
             if result and result[0]:
                 eng_best = result[0][0] + result[0][1]
         except Exception as ex:
-            print(f"[bestmove/current engine error] {ex}")
+            log.error(f"[bestmove/current engine error] {ex}")
 
         sf_best = _sf_best_move_from_fen(_fen())
         return jsonify({"engine": eng_best, "stockfish": sf_best})
     except Exception as ex:
-        traceback.print_exc()
+        log.error(traceback.format_exc())
         return jsonify({"error": str(ex)}), 500
 
 @app.get("/bestmove/played")
@@ -587,7 +621,7 @@ def bestmove_played():
             "move_number": move_no,
         })
     except Exception as ex:
-        traceback.print_exc()
+        log.error(traceback.format_exc())
         return jsonify({"error": str(ex)}), 500
 
 # ── Move review endpoint ──────────────────────────────────────────────────────
@@ -628,7 +662,7 @@ def get_review():
             })
         return jsonify(results)
     except Exception as ex:
-        traceback.print_exc()
+        log.error(traceback.format_exc())
         return jsonify({"error": str(ex)}), 500
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -641,6 +675,7 @@ def get_review():
 
 @app.post("/move/human")
 def human_move():
+    global _fullmove_counter
     d  = request.get_json(force=True)
     fr = d.get("from", "")
     to = d.get("to",   "")
@@ -675,6 +710,11 @@ def human_move():
     _redo_stack.clear()
     engine.move_piece_notation(engine.board, fr, to)
 
+    # Increment fullmove counter after Black's move
+    # (turn has already flipped; "white" now means Black just moved)
+    if engine.current_turn == "white":
+        _fullmove_counter += 1
+
     # Store in history (include snap for undo and bestmove/played endpoint)
     history_entry = dict(review)
     history_entry["snap"] = pre_snap
@@ -704,6 +744,7 @@ def human_move():
 
 @app.post("/move/engine")
 def engine_move():
+    global _fullmove_counter
     d     = request.get_json(force=True, silent=True) or {}
     depth = int(d.get("depth", engine.ENGINE_DEPTH))
     moves = engine.generate_all_legal_moves(engine.board, engine.current_turn)
@@ -725,6 +766,10 @@ def engine_move():
     _undo_stack.append(_snap_full())
     _redo_stack.clear()
     engine.move_piece_notation(engine.board, fr, to)
+
+    # Increment fullmove counter after Black's move
+    if engine.current_turn == "white":
+        _fullmove_counter += 1
 
     history_entry = dict(review)
     history_entry["snap"] = pre_snap
@@ -751,6 +796,7 @@ def engine_move():
 
 @app.post("/move/stockfish")
 def sf_move():
+    global _fullmove_counter
     if not STOCKFISH_OK or _sf is None:
         return jsonify({"error": f"Stockfish not available: {STOCKFISH_ERR}"}), 501
     moves = engine.generate_all_legal_moves(engine.board, engine.current_turn)
@@ -758,8 +804,9 @@ def sf_move():
         return jsonify({"error": "no legal moves"}), 400
     try:
         fen_str = _fen()
-        _sf.set_fen_position(fen_str)
-        uci = _sf.get_best_move()
+        with _sf_lock:
+            _sf.set_fen_position(fen_str)
+            uci = _sf.get_best_move()
         if not uci or len(uci) < 4:
             return jsonify({"error": "Stockfish returned no move"}), 500
         fr = uci[0:2]
@@ -782,6 +829,10 @@ def sf_move():
         if len(uci) == 5:
             promo = uci[4].upper()
             engine.board[r2][c2] = promo if engine.current_turn == "black" else promo.lower()
+
+        # Increment fullmove counter after Black's move
+        if engine.current_turn == "white":
+            _fullmove_counter += 1
 
         history_entry = dict(review)
         history_entry["snap"] = pre_snap
@@ -806,7 +857,7 @@ def sf_move():
         }
         return jsonify(payload)
     except Exception as ex:
-        print(f"[SF move error]\n{traceback.format_exc()}")
+        log.error(f"[SF move error]\n{traceback.format_exc()}")
         return jsonify({"error": f"Stockfish error: {str(ex)}"}), 500
 
 
@@ -947,13 +998,11 @@ def save_game():
     Body: { "moves": [...], "result": "1-0"|"0-1"|"1/2-1/2",
             "accuracy": {...}, "date": "..." }
     """
-    import json as _json, datetime as _dt
-
     try:
         body = request.get_json(force=True, silent=True) or {}
 
         record = {
-            "date":     body.get("date") or _dt.datetime.utcnow().isoformat() + "Z",
+            "date":     body.get("date") or datetime.datetime.utcnow().isoformat() + "Z",
             "result":   body.get("result", "?"),
             "moves":    body.get("moves", []),
             "accuracy": body.get("accuracy", {}),
@@ -980,7 +1029,7 @@ def save_game():
         if os.path.exists(save_path):
             try:
                 with open(save_path, "r", encoding="utf-8") as f:
-                    games = _json.load(f)
+                    games = json.load(f)
                 if not isinstance(games, list):
                     games = []
             except Exception:
@@ -989,17 +1038,17 @@ def save_game():
         games.append(record)
 
         with open(save_path, "w", encoding="utf-8") as f:
-            _json.dump(games, f, indent=2, ensure_ascii=False)
+            json.dump(games, f, indent=2, ensure_ascii=False)
 
         return jsonify({"saved": True, "total_games": len(games)})
 
     except Exception as ex:
-        traceback.print_exc()
+        log.error(traceback.format_exc())
         return jsonify({"error": str(ex)}), 500
 
 @app.get("/debug")
 def debug():
-    project_dir = os.path.dirname(os.path.abspath(__file__))
+    project_dir = PROJECT_DIR
     sounds_dir  = os.path.join(project_dir, 'sounds')
     static_sounds_dir = os.path.join(project_dir, 'static', 'sounds')
     return jsonify({
@@ -1009,6 +1058,7 @@ def debug():
         "project_dir":       project_dir,
         "files_in_cwd":      os.listdir("."),
         "move_history_len":  len(_move_history),
+        "fullmove_counter":  _fullmove_counter,
         "sounds_at_root":    {
             "dir_exists":  os.path.isdir(sounds_dir),
             "move.wav":    os.path.exists(os.path.join(sounds_dir, "move.wav")),
@@ -1024,4 +1074,4 @@ def debug():
     })
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=False)
