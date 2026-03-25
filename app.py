@@ -38,20 +38,34 @@ def serve_sound(filename):
 
 # ── Stockfish init ─────────────────────────────────────────────────────────────
 # Absolute path — independent of Gunicorn's working directory.
-SF_PATH       = os.path.join(PROJECT_DIR, "bin", "stockfish")
-SF_DEPTH      = 12
+SF_PATH  = os.path.join(PROJECT_DIR, "bin", "stockfish")
+# Depth 8 is plenty for move review; override with env var SF_DEPTH if needed.
+SF_DEPTH = int(os.environ.get("SF_DEPTH", "8"))
 
-_sf           = None        # sentinel only — True when Stockfish is healthy
+_sf           = None        # sentinel — set to a Stockfish object when ready
 _sf_lock      = threading.Lock()
 STOCKFISH_OK  = False
 STOCKFISH_ERR = ""
+
+# ── Position analysis cache (1-entry, keyed by FEN) ───────────────────────────
+# Stores the result of the last analyze_position() call so that multiple
+# helpers asking about the same FEN pay the Stockfish cost only once.
+_sf_cache_fen    = None
+_sf_cache_result = None   # dict: {best_move, eval_cp, eval_pawns}
+
+
+def _invalidate_sf_cache():
+    """Clear the position cache. Call whenever the board position changes
+    externally (reset, undo, redo) so stale results are never returned."""
+    global _sf_cache_fen, _sf_cache_result
+    _sf_cache_fen    = None
+    _sf_cache_result = None
 
 
 def _new_sf():
     """
     Create and return a fresh, configured Stockfish instance.
     Raises if the binary is missing or Stockfish fails to start.
-    Always use a fresh instance per query — never share state between calls.
     """
     from stockfish import Stockfish
     if not os.path.isfile(SF_PATH):
@@ -227,37 +241,72 @@ def _fen():
          if engine.en_passant_target else "-"
     return f"{'/'.join(rows)} {t} {ca} {ep} {engine.halfmove_clock} {_fullmove_counter}"
 
-def _sf_eval_at_fen(fen_str):
+def analyze_position(fen_str):
     """
-    Get Stockfish centipawn eval at a given FEN, always from WHITE's perspective.
-    Returns int or None if Stockfish not available.
-    Uses a fresh Stockfish instance to avoid shared-state corruption.
+    THE single Stockfish entry point — call this instead of any individual
+    eval/best-move helper.  One get_top_moves(1) call delivers everything:
+      • best_move  : UCI string (e.g. "e2e4") or None
+      • eval_cp    : centipawns, WHITE-positive, or None
+      • eval_pawns : eval_cp / 100.0, or None
+
+    Results are cached by FEN so repeated calls for the same position
+    (e.g. eval bar + move review on the same turn) are instant.
     """
+    global _sf_cache_fen, _sf_cache_result
+
     if not STOCKFISH_OK or _sf is None:
-        return None
+        return {"best_move": None, "eval_cp": None, "eval_pawns": None}
+
+    # ── Cache hit ──────────────────────────────────────────────────────────────
+    if fen_str == _sf_cache_fen and _sf_cache_result is not None:
+        return _sf_cache_result
+
+    result = {"best_move": None, "eval_cp": None, "eval_pawns": None}
     try:
         with _sf_lock:
             sf = _new_sf()
             sf.set_fen_position(fen_str)
-            info = sf.get_evaluation()
-        if not info:
-            return None
-        side = fen_str.split()[1] if ' ' in fen_str else 'w'
-        if info["type"] == "cp":
-            cp = info["value"]
-            # stockfish-python returns cp from side-to-move perspective; convert to white-positive
-            if side == 'b':
-                cp = -cp
-            return cp
-        if info["type"] == "mate":
-            # Positive mate value means the side-to-move wins
-            sign = 1 if info["value"] > 0 else -1
-            if side == 'b':
-                sign = -sign
-            return sign * 99999
+            top = sf.get_top_moves(1)
+
+        if top:
+            entry     = top[0]
+            best_uci  = entry.get("Move", "")
+            centipawn = entry.get("Centipawn")
+            mate      = entry.get("Mate")
+            side      = fen_str.split()[1] if ' ' in fen_str else 'w'
+
+            if best_uci and len(best_uci) >= 4:
+                result["best_move"] = best_uci[:4]
+
+            if mate is not None:
+                sign = 1 if mate > 0 else -1
+                if side == 'b':
+                    sign = -sign
+                cp = sign * 99999
+            elif centipawn is not None:
+                cp = centipawn
+                if side == 'b':
+                    cp = -cp
+            else:
+                cp = None
+
+            result["eval_cp"]    = cp
+            result["eval_pawns"] = round(cp / 100.0, 2) if cp is not None else None
+
     except Exception as ex:
-        log.warning("[SF eval_at_fen error] %s", ex)
-    return None
+        log.error("[analyze_position error] %s", ex)
+
+    # ── Cache store ────────────────────────────────────────────────────────────
+    _sf_cache_fen    = fen_str
+    _sf_cache_result = result
+    return result
+
+
+# ── Thin compatibility wrappers (keep call-sites unchanged) ────────────────────
+
+def _sf_eval_at_fen(fen_str):
+    """White-positive centipawn eval at a given FEN. Uses analyze_position cache."""
+    return analyze_position(fen_str)["eval_cp"]
 
 
 def _sf_eval():
@@ -267,70 +316,16 @@ def _sf_eval():
 
 def _sf_best_move_and_eval(fen_str):
     """
-    Ask Stockfish for the best move at the given FEN position.
-    Returns (best_move_uci, eval_after_best) where eval_after_best is
-    the Stockfish eval AFTER the best move is played (white-positive).
-    Returns (None, None) if unavailable.
-
-    Uses get_top_moves(1) which atomically returns both the move and its
-    evaluation — no make_moves_from_current_position, no state mutation.
+    Returns (best_move_uci, eval_cp_white_positive).
+    Both values come from a single analyze_position() call — no extra SF spawn.
     """
-    if not STOCKFISH_OK or _sf is None:
-        return None, None
-    try:
-        with _sf_lock:
-            sf = _new_sf()
-            sf.set_fen_position(fen_str)
-            top = sf.get_top_moves(1)
-
-        if not top:
-            return None, None
-
-        best = top[0]
-        best_uci = best.get("Move", "")
-        if not best_uci or len(best_uci) < 4:
-            return None, None
-
-        best_eval = None
-        centipawn = best.get("Centipawn")
-        mate       = best.get("Mate")
-        side       = fen_str.split()[1] if ' ' in fen_str else 'w'
-
-        if mate is not None:
-            # Positive Mate → side-to-move delivers mate (good for them)
-            sign = 1 if mate > 0 else -1
-            # Convert to white-positive: if black to move and they win, sign flips
-            if side == 'b':
-                sign = -sign
-            best_eval = sign * 99999
-        elif centipawn is not None:
-            # get_top_moves returns cp from side-to-move perspective
-            cp = centipawn
-            if side == 'b':
-                cp = -cp
-            best_eval = cp
-
-        return best_uci[:4], best_eval
-
-    except Exception as ex:
-        log.error("[SF best_move_and_eval error] %s", ex)
-    return None, None
+    r = analyze_position(fen_str)
+    return r["best_move"], r["eval_cp"]
 
 
 def _sf_best_move_from_fen(fen_str):
-    """Ask Stockfish for best move given a FEN string. Returns UCI string or None."""
-    if not STOCKFISH_OK or _sf is None:
-        return None
-    try:
-        with _sf_lock:
-            sf = _new_sf()
-            sf.set_fen_position(fen_str)
-            uci = sf.get_best_move()
-        if uci and len(uci) >= 4:
-            return uci[:4]
-    except Exception as ex:
-        log.error("[sf_best_move_from_fen error] %s", ex)
-    return None
+    """Best move UCI string for a given FEN. Uses analyze_position cache."""
+    return analyze_position(fen_str)["best_move"]
 
 def _classify_move(eval_before, best_eval, eval_after, moving_color, sacrificed_material=0):
     """
@@ -390,9 +385,19 @@ def _is_book_move(move_number, eval_before):
         return False
     return move_number <= 10 and abs(eval_before) <= 30
 
-def _payload(with_sf=False):
+def _payload(with_sf=False, precomputed_fen=None):
+    """
+    Build the standard board payload.
+    If precomputed_fen is supplied and matches the current board FEN,
+    the analyze_position cache will be hit (free) instead of spawning SF.
+    """
     eng_eval = _engine_eval()
-    sf_eval  = _sf_eval() if with_sf else None
+    if with_sf:
+        # Use current board FEN — hits cache if analyze_position was already
+        # called for this position (e.g. inside _build_move_review_entry).
+        sf_eval = analyze_position(_fen())["eval_cp"]
+    else:
+        sf_eval = None
     return {
         "board":          engine.board,
         "current_turn":   engine.current_turn,
@@ -454,24 +459,31 @@ def _best_move_from_snap(s):
 
 def _build_move_review_entry(pre_snap, played_uci, move_number):
     """
-    Given the pre-move snapshot and what was played, compute all review fields.
-    Returns a dict ready to be stored in _move_history and returned to client.
+    Compute all review fields for one move.
+
+    Stockfish cost: 2 analyze_position() calls (fen_before + fen_after).
+    Both results are cached, so any subsequent helper that asks about the
+    same FEN (e.g. _payload's eval bar) is free.
     Fully restores global state after computation.
     """
     saved = _snap()
     try:
         _restore(pre_snap)
-        fen_before     = _fen()
-        moving_color   = engine.current_turn
-        eval_before    = _sf_eval_at_fen(fen_before)
-        best_uci, best_eval = _sf_best_move_and_eval(fen_before)
+        fen_before   = _fen()
+        moving_color = engine.current_turn
 
-        # ── Material tracking for Brilliant detection ──
-        # Record own material BEFORE the move
+        # ── Single SF call for the pre-move position ──────────────────────────
+        pre_analysis = analyze_position(fen_before)   # cached from here on
+        eval_before  = pre_analysis["eval_cp"]
+        best_uci     = pre_analysis["best_move"]
+        best_eval    = pre_analysis["eval_cp"]  # eval AT fen_before = eval of best move
+        # NOTE: best_eval here is the eval at the position where the best move
+        # was chosen (before the move), which is what _classify_move expects
+        # (it diffs eval_after vs best_eval both in white-positive cp terms).
+
+        # ── Material tracking for Brilliant detection ──────────────────────────
         own_material_before = _material_score(engine.board, moving_color)
 
-        # Use a board copy for material counting — keeps global state clean
-        # until eval_after needs the full FEN after the real move
         temp_board = copy.deepcopy(engine.board)
         temp_fr, temp_fc = engine.notation_to_index(played_uci[:2])
         temp_tr, temp_tc = engine.notation_to_index(played_uci[2:4])
@@ -482,51 +494,52 @@ def _build_move_review_entry(pre_snap, played_uci, move_number):
         own_material_after  = _material_score(temp_board, moving_color)
         sacrificed_material = max(0, own_material_before - own_material_after)
 
-        # For eval_after we need the real FEN — apply move on global board
-        # (finally block will restore it regardless of what happens next)
+        # ── Apply move, get fen_after, single SF call for post-move position ──
         engine.move_piece_notation(engine.board, played_uci[:2], played_uci[2:4])
-        eval_after = _sf_eval_at_fen(_fen())
+        fen_after    = _fen()
+        post_analysis = analyze_position(fen_after)   # cached — _payload reuses this
+        eval_after    = post_analysis["eval_cp"]
 
         classification = _classify_move(
             eval_before, best_eval, eval_after,
             moving_color, sacrificed_material
         )
 
-        # Override with Book Move if applicable (Book takes lowest priority —
-        # only applies if not already Brilliant/Best)
         if classification not in ("Brilliant", "Best") and _is_book_move(move_number, eval_before):
             classification = "Book"
 
         return {
-            "move_number":        move_number,
-            "played":             played_uci,
-            "best":               best_uci,
-            "eval_before":        round(eval_before / 100, 2) if eval_before is not None else None,
-            "eval_after":         round(eval_after  / 100, 2) if eval_after  is not None else None,
-            "best_eval":          round(best_eval   / 100, 2) if best_eval   is not None else None,
-            "classification":     classification,
-            "moving_color":       moving_color,
+            "move_number":         move_number,
+            "played":              played_uci,
+            "best":                best_uci,
+            "eval_before":         round(eval_before / 100, 2) if eval_before is not None else None,
+            "eval_after":          round(eval_after  / 100, 2) if eval_after  is not None else None,
+            "best_eval":           round(best_eval   / 100, 2) if best_eval   is not None else None,
+            "classification":      classification,
+            "moving_color":        moving_color,
             "sacrificed_material": sacrificed_material,
-            # Raw centipawns stored for frontend classification logic
-            "eval_before_cp":     eval_before,
-            "eval_after_cp":      eval_after,
-            "best_eval_cp":       best_eval,
+            "eval_before_cp":      eval_before,
+            "eval_after_cp":       eval_after,
+            "best_eval_cp":        best_eval,
+            # Stash fen_after so _payload can reuse the cached analysis
+            "_fen_after":          fen_after,
         }
     except Exception as ex:
-        log.error(f"[build_move_review_entry error] {ex}")
+        log.error("[build_move_review_entry error] %s", ex)
         return {
-            "move_number":        move_number,
-            "played":             played_uci,
-            "best":               None,
-            "eval_before":        None,
-            "eval_after":         None,
-            "best_eval":          None,
-            "classification":     None,
-            "moving_color":       engine.current_turn,
+            "move_number":         move_number,
+            "played":              played_uci,
+            "best":                None,
+            "eval_before":         None,
+            "eval_after":          None,
+            "best_eval":           None,
+            "classification":      None,
+            "moving_color":        engine.current_turn,
             "sacrificed_material": 0,
-            "eval_before_cp":     None,
-            "eval_after_cp":      None,
-            "best_eval_cp":       None,
+            "eval_before_cp":      None,
+            "eval_after_cp":       None,
+            "best_eval_cp":        None,
+            "_fen_after":          None,
         }
     finally:
         _restore(saved)
@@ -897,6 +910,7 @@ def undo():
         return jsonify({"error": "nothing to undo"}), 400
     _redo_stack.append(_snap_full())
     _restore_full(_undo_stack.pop())
+    _invalidate_sf_cache()          # board changed — discard cached analysis
     payload = _payload(with_sf=False)
     payload["move_history"] = _history_for_client()
     return jsonify(payload)
@@ -907,6 +921,7 @@ def redo():
         return jsonify({"error": "nothing to redo"}), 400
     _undo_stack.append(_snap_full())
     _restore_full(_redo_stack.pop())
+    _invalidate_sf_cache()          # board changed — discard cached analysis
     payload = _payload(with_sf=False)
     payload["move_history"] = _history_for_client()
     return jsonify(payload)
@@ -917,6 +932,7 @@ def reset():
     _undo_stack.clear()
     _redo_stack.clear()
     _move_history.clear()
+    _invalidate_sf_cache()          # fresh game — discard any cached analysis
     return jsonify(_payload(with_sf=False))
 
 
