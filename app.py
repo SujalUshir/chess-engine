@@ -48,7 +48,7 @@ def _init_stockfish():
         from stockfish import Stockfish
 
         # Use system-installed Stockfish (Render path)
-        sf = Stockfish(path=os.path.join(PROJECT_DIR, "bin", "stockfish"))
+        sf = Stockfish(path="./bin/stockfish")
 
         sf.set_depth(12)
         sf.set_fen_position("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
@@ -88,6 +88,8 @@ _move_history = []
 
 # ── Fullmove counter (increments after Black's move, resets on new game) ──────
 _fullmove_counter = 1
+
+_init_stockfish()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
@@ -1036,13 +1038,11 @@ def debug():
     sounds_dir = os.path.join(PROJECT_DIR, "sounds")
     static_sounds_dir = os.path.join(PROJECT_DIR, "static", "sounds")
 
-    sf_path = os.path.join(PROJECT_DIR, "bin", "stockfish")
+    sf_path = "/usr/games/stockfish"
     sf_exists = os.path.exists(sf_path)
     return jsonify({
-        "stockfish_ok":             STOCKFISH_OK,
-        "stockfish_error":          STOCKFISH_ERR,
-        "stockfish_binary_exists":  sf_exists,
-        "stockfish_binary_path":    sf_path,
+        "stockfish_ok":      STOCKFISH_OK,
+        "stockfish_error":   STOCKFISH_ERR,
         "cwd":               os.getcwd(),
         "project_dir":       PROJECT_DIR,
         "files_in_cwd":      os.listdir("."),
