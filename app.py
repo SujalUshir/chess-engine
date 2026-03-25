@@ -39,10 +39,12 @@ def serve_sound(filename):
 # ── Stockfish init ─────────────────────────────────────────────────────────────
 # Absolute path — independent of Gunicorn's working directory.
 SF_PATH  = os.path.join(PROJECT_DIR, "bin", "stockfish")
-# Depth 8 is plenty for move review; override with env var SF_DEPTH if needed.
-SF_DEPTH = int(os.environ.get("SF_DEPTH", "8"))
+# Depth 6 balances quality (~0.1-0.3s) vs depth 8 (~2-5s). Override: SF_DEPTH env var.
+SF_DEPTH = int(os.environ.get("SF_DEPTH", "6"))
 
-_sf           = None        # sentinel — set to a Stockfish object when ready
+# ── Single persistent Stockfish process — never respawned after init ───────────
+# Using one long-lived process eliminates the ~1-2s startup cost per move.
+_sf_instance  = None        # the one and only Stockfish process
 _sf_lock      = threading.Lock()
 STOCKFISH_OK  = False
 STOCKFISH_ERR = ""
@@ -65,6 +67,7 @@ def _invalidate_sf_cache():
 def _new_sf():
     """
     Create and return a fresh, configured Stockfish instance.
+    Called ONCE at startup — thereafter _sf_instance is reused.
     Raises if the binary is missing or Stockfish fails to start.
     """
     from stockfish import Stockfish
@@ -76,15 +79,16 @@ def _new_sf():
 
 
 def _init_stockfish():
-    global _sf, STOCKFISH_OK, STOCKFISH_ERR
+    global _sf_instance, STOCKFISH_OK, STOCKFISH_ERR
     try:
         sf = _new_sf()
         sf.set_fen_position("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
         move = sf.get_best_move()
         if move:
-            _sf = sf          # keep probe instance as sentinel; never queried again
+            # Keep the fully-warmed-up instance alive for all future calls.
+            _sf_instance = sf
             STOCKFISH_OK = True
-            log.info("[Stockfish] Ready — path=%s, test_move=%s", SF_PATH, move)
+            log.info("[Stockfish] Ready — path=%s depth=%d test_move=%s", SF_PATH, SF_DEPTH, move)
         else:
             raise RuntimeError("Stockfish returned no move on start position")
     except Exception as e:
@@ -254,19 +258,21 @@ def analyze_position(fen_str):
     """
     global _sf_cache_fen, _sf_cache_result
 
-    if not STOCKFISH_OK or _sf is None:
+    if not STOCKFISH_OK or _sf_instance is None:
         return {"best_move": None, "eval_cp": None, "eval_pawns": None}
 
-    # ── Cache hit ──────────────────────────────────────────────────────────────
+    # ── Cache hit — free if same FEN asked twice in one move cycle ─────────────
     if fen_str == _sf_cache_fen and _sf_cache_result is not None:
+        log.info("[SF] analyze_position cache hit — FEN: %s", fen_str[:40])
         return _sf_cache_result
 
+    log.info("[SF] analyze_position called (depth=%d) — FEN: %s", SF_DEPTH, fen_str[:40])
     result = {"best_move": None, "eval_cp": None, "eval_pawns": None}
     try:
         with _sf_lock:
-            sf = _new_sf()
-            sf.set_fen_position(fen_str)
-            top = sf.get_top_moves(1)
+            # Reuse the persistent process — no spawn overhead.
+            _sf_instance.set_fen_position(fen_str)
+            top = _sf_instance.get_top_moves(1)
 
         if top:
             entry     = top[0]
@@ -821,18 +827,35 @@ def engine_move():
 @app.post("/move/stockfish")
 def sf_move():
     global _fullmove_counter
-    if not STOCKFISH_OK or _sf is None:
+    if not STOCKFISH_OK or _sf_instance is None:
         return jsonify({"error": f"Stockfish not available: {STOCKFISH_ERR}"}), 501
     moves = engine.generate_all_legal_moves(engine.board, engine.current_turn)
     if not moves:
         return jsonify({"error": "no legal moves"}), 400
     try:
         fen_str = _fen()
-        # Fresh instance per request — no shared mutable state
-        with _sf_lock:
-            sf = _new_sf()
-            sf.set_fen_position(fen_str)
-            uci = sf.get_best_move()
+
+        # ── CRITICAL: use analyze_position() NOT _sf_instance directly ──────────
+        # Calling _sf_instance.set_fen_position() + get_best_move() here and then
+        # immediately calling _build_move_review_entry() (which calls analyze_position
+        # → set_fen_position again) corrupts Stockfish's internal position state,
+        # causing get_best_move() to return None even for valid positions.
+        #
+        # analyze_position() is the single safe entry point: it holds the lock
+        # for the entire set_fen + query sequence AND caches the result by FEN,
+        # so _build_move_review_entry's two subsequent calls are free cache hits.
+        sf_result = analyze_position(fen_str)
+        uci = sf_result.get("best_move")
+
+        # Retry once with a fresh set_fen if result was None (rare corruption recovery)
+        if not uci:
+            log.warning("[SF] get_best_move returned None for FEN: %s — retrying", fen_str[:50])
+            _invalidate_sf_cache()
+            with _sf_lock:
+                _sf_instance.set_fen_position(fen_str)
+                uci = _sf_instance.get_best_move()
+            log.warning("[SF] retry result: %s", uci)
+
         if not uci or len(uci) < 4:
             return jsonify({"error": "Stockfish returned no move"}), 500
         fr = uci[0:2]
@@ -840,6 +863,7 @@ def sf_move():
         r1, c1 = engine.notation_to_index(fr)
         r2, c2 = engine.notation_to_index(to)
         piece  = engine.board[r1][c1]
+        moving_color = engine.current_turn  # capture BEFORE move_piece_notation flips the turn
         if piece == ".":
             return jsonify({"error": f"Stockfish picked empty square {fr}"}), 500
 
@@ -854,7 +878,8 @@ def sf_move():
         engine.move_piece_notation(engine.board, fr, to)
         if len(uci) == 5:
             promo = uci[4].upper()
-            engine.board[r2][c2] = promo if engine.current_turn == "black" else promo.lower()
+            # `moving_color` captured before the turn flipped; White promotes to uppercase.
+            engine.board[r2][c2] = promo if moving_color == "white" else promo.lower()
 
         # Increment fullmove counter after Black's move
         if engine.current_turn == "white":

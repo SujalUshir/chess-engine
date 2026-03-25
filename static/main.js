@@ -556,8 +556,15 @@ const App = (() => {
     const page=document.createElement('div');
     page.className='page info-page';
     page.innerHTML=`
-      <h2>About the Project</h2>
-      <p class="sub">Chess Engine — Built from scratch</p>
+      <h2>About This Project</h2>
+      <p class="sub">Chess Engine — Built from scratch using Flask &amp; Stockfish</p>
+      <div class="info-sec">
+        <h3>About</h3>
+        <ul class="feat-list">
+          <li>This is a chess engine web application built using Flask and Stockfish.</li>
+          <li>It allows users to play chess with real-time engine analysis.</li>
+        </ul>
+      </div>
       <div class="info-sec">
         <h3>Features</h3>
         <ul class="feat-list">
@@ -590,11 +597,12 @@ const App = (() => {
         </div>
       </div>
       <div class="info-sec">
-        <h3>Author</h3>
+        <h3>Developer</h3>
         <div class="author-card">
-          <div class="author-av">C</div>
+          <div class="author-av">S</div>
           <div class="author-info">
-            <h4>Chess Engine Project</h4>
+            <h4>Sujal Ajit Ushir</h4>
+            <p style="font-weight:600;margin-bottom:4px">IIIT Kottayam</p>
             <p>Full-stack chess — hand-crafted Python engine, Flask REST API, responsive SPA frontend.</p>
           </div>
         </div>
