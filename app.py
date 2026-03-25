@@ -37,31 +37,42 @@ def serve_sound(filename):
     return send_from_directory(sounds_dir, filename)
 
 # ── Stockfish init ─────────────────────────────────────────────────────────────
-_sf           = None
+# Absolute path — independent of Gunicorn's working directory.
+SF_PATH       = os.path.join(PROJECT_DIR, "bin", "stockfish")
+SF_DEPTH      = 12
+
+_sf           = None        # sentinel only — True when Stockfish is healthy
 _sf_lock      = threading.Lock()
 STOCKFISH_OK  = False
 STOCKFISH_ERR = ""
 
+
+def _new_sf():
+    """
+    Create and return a fresh, configured Stockfish instance.
+    Raises if the binary is missing or Stockfish fails to start.
+    Always use a fresh instance per query — never share state between calls.
+    """
+    from stockfish import Stockfish
+    if not os.path.isfile(SF_PATH):
+        raise FileNotFoundError(f"Stockfish binary not found: {SF_PATH}")
+    sf = Stockfish(path=SF_PATH)
+    sf.set_depth(SF_DEPTH)
+    return sf
+
+
 def _init_stockfish():
     global _sf, STOCKFISH_OK, STOCKFISH_ERR
     try:
-        from stockfish import Stockfish
-
-        # Use system-installed Stockfish (Render path)
-        sf = Stockfish(path="./bin/stockfish")
-
-        sf.set_depth(12)
+        sf = _new_sf()
         sf.set_fen_position("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
-
         move = sf.get_best_move()
-
         if move:
-            _sf = sf
+            _sf = sf          # keep probe instance as sentinel; never queried again
             STOCKFISH_OK = True
-            log.info("[Stockfish] Ready — system binary, test_move=%s", move)
+            log.info("[Stockfish] Ready — path=%s, test_move=%s", SF_PATH, move)
         else:
-            raise Exception("Stockfish returned no move")
-
+            raise RuntimeError("Stockfish returned no move on start position")
     except Exception as e:
         STOCKFISH_ERR = str(e)
         log.warning("[Stockfish] Init failed: %s", e)
@@ -220,35 +231,39 @@ def _sf_eval_at_fen(fen_str):
     """
     Get Stockfish centipawn eval at a given FEN, always from WHITE's perspective.
     Returns int or None if Stockfish not available.
+    Uses a fresh Stockfish instance to avoid shared-state corruption.
     """
     if not STOCKFISH_OK or _sf is None:
         return None
     try:
         with _sf_lock:
-            _sf.set_fen_position(fen_str)
-            info = _sf.get_evaluation()
+            sf = _new_sf()
+            sf.set_fen_position(fen_str)
+            info = sf.get_evaluation()
         if not info:
             return None
-        # Determine whose turn it is from FEN
         side = fen_str.split()[1] if ' ' in fen_str else 'w'
         if info["type"] == "cp":
             cp = info["value"]
-            # stockfish-python returns eval from side-to-move perspective
+            # stockfish-python returns cp from side-to-move perspective; convert to white-positive
             if side == 'b':
                 cp = -cp
             return cp
         if info["type"] == "mate":
+            # Positive mate value means the side-to-move wins
             sign = 1 if info["value"] > 0 else -1
             if side == 'b':
                 sign = -sign
             return sign * 99999
     except Exception as ex:
-        log.warning(f"[SF eval_at_fen error] {ex}")
+        log.warning("[SF eval_at_fen error] %s", ex)
     return None
+
 
 def _sf_eval():
     """Return Stockfish eval for current global board position."""
     return _sf_eval_at_fen(_fen())
+
 
 def _sf_best_move_and_eval(fen_str):
     """
@@ -256,43 +271,51 @@ def _sf_best_move_and_eval(fen_str):
     Returns (best_move_uci, eval_after_best) where eval_after_best is
     the Stockfish eval AFTER the best move is played (white-positive).
     Returns (None, None) if unavailable.
+
+    Uses get_top_moves(1) which atomically returns both the move and its
+    evaluation — no make_moves_from_current_position, no state mutation.
     """
     if not STOCKFISH_OK or _sf is None:
         return None, None
     try:
         with _sf_lock:
-            _sf.set_fen_position(fen_str)
-            best_uci = _sf.get_best_move()
-            if not best_uci or len(best_uci) < 4:
-                return None, None
+            sf = _new_sf()
+            sf.set_fen_position(fen_str)
+            top = sf.get_top_moves(1)
 
-            best_eval = None
-            try:
-                _sf.set_fen_position(fen_str)
-                # Use make_moves_from_current_position to apply the best move
-                _sf.make_moves_from_current_position([best_uci])
-                info = _sf.get_evaluation()
-                if info:
-                    side = fen_str.split()[1] if ' ' in fen_str else 'w'
-                    # After best move, it's the opponent's turn — SF eval is from their view
-                    # We want white-positive, so negate if side was white (now black to move after)
-                    if info["type"] == "cp":
-                        cp = info["value"]
-                        if side == 'w':
-                            cp = -cp
-                        best_eval = cp
-                    elif info["type"] == "mate":
-                        sign = 1 if info["value"] > 0 else -1
-                        if side == 'w':
-                            sign = -sign
-                        best_eval = sign * 99999
-            except Exception:
-                best_eval = None
+        if not top:
+            return None, None
+
+        best = top[0]
+        best_uci = best.get("Move", "")
+        if not best_uci or len(best_uci) < 4:
+            return None, None
+
+        best_eval = None
+        centipawn = best.get("Centipawn")
+        mate       = best.get("Mate")
+        side       = fen_str.split()[1] if ' ' in fen_str else 'w'
+
+        if mate is not None:
+            # Positive Mate → side-to-move delivers mate (good for them)
+            sign = 1 if mate > 0 else -1
+            # Convert to white-positive: if black to move and they win, sign flips
+            if side == 'b':
+                sign = -sign
+            best_eval = sign * 99999
+        elif centipawn is not None:
+            # get_top_moves returns cp from side-to-move perspective
+            cp = centipawn
+            if side == 'b':
+                cp = -cp
+            best_eval = cp
 
         return best_uci[:4], best_eval
+
     except Exception as ex:
-        log.error(f"[SF best_move_and_eval error] {ex}")
+        log.error("[SF best_move_and_eval error] %s", ex)
     return None, None
+
 
 def _sf_best_move_from_fen(fen_str):
     """Ask Stockfish for best move given a FEN string. Returns UCI string or None."""
@@ -300,12 +323,13 @@ def _sf_best_move_from_fen(fen_str):
         return None
     try:
         with _sf_lock:
-            _sf.set_fen_position(fen_str)
-            uci = _sf.get_best_move()
+            sf = _new_sf()
+            sf.set_fen_position(fen_str)
+            uci = sf.get_best_move()
         if uci and len(uci) >= 4:
             return uci[:4]
     except Exception as ex:
-        log.error(f"[sf_best_move_from_fen error] {ex}")
+        log.error("[sf_best_move_from_fen error] %s", ex)
     return None
 
 def _classify_move(eval_before, best_eval, eval_after, moving_color, sacrificed_material=0):
@@ -791,9 +815,11 @@ def sf_move():
         return jsonify({"error": "no legal moves"}), 400
     try:
         fen_str = _fen()
+        # Fresh instance per request — no shared mutable state
         with _sf_lock:
-            _sf.set_fen_position(fen_str)
-            uci = _sf.get_best_move()
+            sf = _new_sf()
+            sf.set_fen_position(fen_str)
+            uci = sf.get_best_move()
         if not uci or len(uci) < 4:
             return jsonify({"error": "Stockfish returned no move"}), 500
         fr = uci[0:2]
@@ -1033,16 +1059,33 @@ def save_game():
         log.error(traceback.format_exc())
         return jsonify({"error": str(ex)}), 500
 
+@app.get("/test_sf")
+def test_sf():
+    """Quick smoke-test for the Stockfish helpers — hit GET /test_sf after deploy."""
+    start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    bm  = _sf_best_move_from_fen(start_fen)
+    ev  = _sf_eval_at_fen(start_fen)
+    bm2, be = _sf_best_move_and_eval(start_fen)
+    return jsonify({
+        "stockfish_ok":         STOCKFISH_OK,
+        "startpos_best_move":   bm,
+        "startpos_eval_cp":     ev,
+        "best_move_and_eval":   {"move": bm2, "eval_cp": be},
+        "all_not_none":         all(x is not None for x in [bm, ev, bm2]),
+    })
+
+
 @app.get("/debug")
 def debug():
     sounds_dir = os.path.join(PROJECT_DIR, "sounds")
     static_sounds_dir = os.path.join(PROJECT_DIR, "static", "sounds")
 
-    sf_path = "/usr/games/stockfish"
-    sf_exists = os.path.exists(sf_path)
+    sf_exists = os.path.isfile(SF_PATH)
     return jsonify({
         "stockfish_ok":      STOCKFISH_OK,
         "stockfish_error":   STOCKFISH_ERR,
+        "stockfish_path":    SF_PATH,
+        "stockfish_binary_exists": sf_exists,
         "cwd":               os.getcwd(),
         "project_dir":       PROJECT_DIR,
         "files_in_cwd":      os.listdir("."),

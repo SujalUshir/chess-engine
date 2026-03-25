@@ -211,9 +211,12 @@ def _fen():
         if not engine.black_rook_h_moved: ca += "k"
         if not engine.black_rook_a_moved: ca += "q"
     ca = ca or "-"
-    ep = engine.index_to_notation(*engine.en_passant_target) \
+    ep = "-" \
          if engine.en_passant_target else "-"
-    return f"{'/'.join(rows)} {t} {ca} {ep} {engine.halfmove_clock} {_fullmove_counter}"
+    fullmove = max(1, _fullmove_counter)
+    halfmove = max(0, engine.halfmove_clock)
+    return f"{'/'.join(rows)} {t} {ca} {ep} {halfmove} {fullmove}"
+
 
 def _sf_eval_at_fen(fen_str):
     """
@@ -294,17 +297,16 @@ def _sf_best_move_and_eval(fen_str):
     return None, None
 
 def _sf_best_move_from_fen(fen_str):
-    """Ask Stockfish for best move given a FEN string. Returns UCI string or None."""
     if not STOCKFISH_OK or _sf is None:
         return None
     try:
         with _sf_lock:
-            _sf.set_fen_position(fen_str)
+            _sf.set_fen_position(fen_str)   # RESET STATE
             uci = _sf.get_best_move()
         if uci and len(uci) >= 4:
             return uci[:4]
     except Exception as ex:
-        log.error(f"[sf_best_move_from_fen error] {ex}")
+        print("SF ERROR:", ex)
     return None
 
 def _classify_move(eval_before, best_eval, eval_after, moving_color, sacrificed_material=0):
