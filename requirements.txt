@@ -1,3 +1,3 @@
 flask
 gunicorn
-stockfish
+stockfish==3.28.0

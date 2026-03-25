@@ -353,40 +353,32 @@ def analyze_position(fen_str):
 
             _sf_instance.set_fen_position(fen_str)
 
-            # ── Primary: get_top_moves(1) gives move + eval in one call ────────
-            top = _sf_instance.get_top_moves(1)
-            log.info("[SF] get_top_moves(1) returned: %s", top)
+            # ── get_best_move() + get_evaluation() — stateless, version-stable ─
+            # Replaced get_top_moves(1) which sets persistent MultiPV UCI state
+            # on the session and returns [] inconsistently on some SF builds.
+            # Both calls happen under the SAME lock so position cannot be mutated
+            # between them.
+            best_uci    = _sf_instance.get_best_move()
+            eval_result = _sf_instance.get_evaluation()   # {"type":"cp"/"mate","value":int}
 
-            best_uci  = None
-            centipawn = None
-            mate      = None
-
-            if top:
-                entry     = top[0]
-                best_uci  = entry.get("Move", "")
-                centipawn = entry.get("Centipawn")
-                mate      = entry.get("Mate")
-            else:
-                # ── Fallback: get_top_moves returned [] (forced move / near-mate)
-                # Use get_best_move() which always returns UCI even in these cases.
-                log.warning("[SF] get_top_moves returned [] — falling back to get_best_move()")
-                best_uci = _sf_instance.get_best_move()
-                log.warning("[SF] get_best_move fallback result: %s", best_uci)
-                # Eval unavailable in this path — leave centipawn/mate as None
+            log.info("[SF] best_move=%s  eval=%s", best_uci, eval_result)
 
             # ── Parse eval ────────────────────────────────────────────────────
             side = fen_str.split()[1] if ' ' in fen_str else 'w'
-            if mate is not None:
-                sign = 1 if mate > 0 else -1
-                if side == 'b':
-                    sign = -sign
-                cp = sign * 99999
-            elif centipawn is not None:
-                cp = centipawn
-                if side == 'b':
-                    cp = -cp
-            else:
-                cp = None
+            cp   = None
+
+            if eval_result:
+                etype = eval_result.get("type")
+                eval  = eval_result.get("value")
+                if etype == "mate" and eval is not None:
+                    sign = 1 if eval > 0 else -1
+                    if side == 'b':
+                        sign = -sign
+                    cp = sign * 99999
+                elif etype == "cp" and eval is not None:
+                    cp = eval
+                    if side == 'b':
+                        cp = -cp
 
             if best_uci and len(best_uci) >= 4:
                 result["best_move"] = best_uci[:4]
