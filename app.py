@@ -40,7 +40,7 @@ def serve_sound(filename):
 # Absolute path — independent of Gunicorn's working directory.
 SF_PATH  = os.path.join(PROJECT_DIR, "bin", "stockfish")
 # Depth 6 balances quality (~0.1-0.3s) vs depth 8 (~2-5s). Override: SF_DEPTH env var.
-SF_DEPTH = int(os.environ.get("SF_DEPTH", "6"))
+SF_DEPTH = int(os.environ.get("SF_DEPTH", "4"))
 
 # ── Single persistent Stockfish process — never respawned after init ───────────
 # Using one long-lived process eliminates the ~1-2s startup cost per move.
@@ -75,6 +75,9 @@ def _new_sf():
         raise FileNotFoundError(f"Stockfish binary not found: {SF_PATH}")
     sf = Stockfish(path=SF_PATH)
     sf.set_depth(SF_DEPTH)
+    # Limit memory use so Render free-tier (512 MB) doesn't OOM-kill the process.
+    # Hash=16 → 16 MB transposition table.  Threads=1 → no extra CPU pressure.
+    sf.update_engine_parameters({"Hash": 16, "Threads": 1})
     return sf
 
 
@@ -387,7 +390,33 @@ def analyze_position(fen_str):
 
     except Exception as ex:
         log.error("[SF] analyze_position EXCEPTION: %s", ex, exc_info=True)
-        # Don't cache exception results — let next call retry
+        # If the Stockfish process crashed, respawn immediately and retry once.
+        if "crashed" in str(ex).lower() or "process" in str(ex).lower():
+            log.warning("[SF] Process crash detected — attempting respawn…")
+            _sf_respawn()
+            if STOCKFISH_OK and _sf_instance is not None:
+                try:
+                    with _sf_lock:
+                        _sf_instance.set_fen_position(fen_str)
+                        best_uci    = _sf_instance.get_best_move()
+                        eval_result = _sf_instance.get_evaluation()
+                    if best_uci and len(best_uci) >= 4:
+                        result["best_move"] = best_uci[:4]
+                    if eval_result:
+                        etype = eval_result.get("type")
+                        val   = eval_result.get("value")
+                        side  = fen_str.split()[1] if ' ' in fen_str else 'w'
+                        if etype == "mate" and val is not None:
+                            sign = 1 if val > 0 else -1
+                            if side == 'b': sign = -sign
+                            result["eval_cp"] = sign * 99999
+                        elif etype == "cp" and val is not None:
+                            result["eval_cp"] = val if side == 'w' else -val
+                        if result["eval_cp"] is not None:
+                            result["eval_pawns"] = round(result["eval_cp"] / 100.0, 2)
+                    log.warning("[SF] Respawn retry result: %s", result)
+                except Exception as ex2:
+                    log.error("[SF] Retry after respawn also failed: %s", ex2)
         return result
 
     # ── Only cache if we got something useful ─────────────────────────────────
