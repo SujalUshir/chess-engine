@@ -245,45 +245,137 @@ def _fen():
          if engine.en_passant_target else "-"
     return f"{'/'.join(rows)} {t} {ca} {ep} {engine.halfmove_clock} {_fullmove_counter}"
 
+def _sf_is_healthy():
+    """
+    Quick health-check: asks Stockfish to evaluate the start position.
+    Returns True if it responds with a valid move, False otherwise.
+    Used to detect silent process crashes (OOM, timeout, etc.).
+    """
+    try:
+        _sf_instance.set_fen_position(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        )
+        mv = _sf_instance.get_best_move()
+        return bool(mv)
+    except Exception:
+        return False
+
+
+def _sf_respawn():
+    """
+    Respawn the Stockfish process after a detected crash.
+    Updates _sf_instance in-place so all callers pick it up automatically.
+    """
+    global _sf_instance, STOCKFISH_OK, STOCKFISH_ERR
+    log.warning("[SF] Respawning Stockfish process…")
+    try:
+        sf = _new_sf()
+        sf.set_fen_position(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        )
+        if sf.get_best_move():
+            _sf_instance = sf
+            STOCKFISH_OK = True
+            _invalidate_sf_cache()
+            log.warning("[SF] Respawn succeeded.")
+        else:
+            raise RuntimeError("Stockfish returned no move after respawn")
+    except Exception as e:
+        STOCKFISH_ERR = str(e)
+        STOCKFISH_OK = False
+        _sf_instance = None
+        log.error("[SF] Respawn FAILED: %s — Stockfish disabled.", e)
+
+
+def _sf_validate_fen(fen_str):
+    """
+    Basic FEN sanity check before sending to Stockfish.
+    Returns True if the FEN looks structurally valid.
+    """
+    if not fen_str or not isinstance(fen_str, str):
+        return False
+    parts = fen_str.strip().split()
+    if len(parts) < 2:
+        return False
+    rows = parts[0].split('/')
+    if len(rows) != 8:
+        return False
+    if parts[1] not in ('w', 'b'):
+        return False
+    return True
+
+
 def analyze_position(fen_str):
     """
-    THE single Stockfish entry point — call this instead of any individual
-    eval/best-move helper.  One get_top_moves(1) call delivers everything:
-      • best_move  : UCI string (e.g. "e2e4") or None
-      • eval_cp    : centipawns, WHITE-positive, or None
-      • eval_pawns : eval_cp / 100.0, or None
+    THE single Stockfish entry point.
+    Returns: { best_move, eval_cp, eval_pawns }
+    All fields default to None if SF unavailable or position terminal.
 
-    Results are cached by FEN so repeated calls for the same position
-    (e.g. eval bar + move review on the same turn) are instant.
+    Guarantees:
+    - Only ONE lock acquisition per real SF call (cache hits are free)
+    - Never caches a failed (all-None) result — a bad call is retried next time
+    - Detects and recovers from silent SF process crashes via health-check
+    - Falls back from get_top_moves → get_best_move if top_moves is empty
+    - Validates FEN before calling SF to avoid silent failures
     """
     global _sf_cache_fen, _sf_cache_result
 
     if not STOCKFISH_OK or _sf_instance is None:
         return {"best_move": None, "eval_cp": None, "eval_pawns": None}
 
-    # ── Cache hit — free if same FEN asked twice in one move cycle ─────────────
-    if fen_str == _sf_cache_fen and _sf_cache_result is not None:
-        log.info("[SF] analyze_position cache hit — FEN: %s", fen_str[:40])
+    # ── FEN validation ─────────────────────────────────────────────────────────
+    if not _sf_validate_fen(fen_str):
+        log.error("[SF] Invalid FEN rejected: %r", fen_str[:60])
+        return {"best_move": None, "eval_cp": None, "eval_pawns": None}
+
+    # ── Cache hit (only serve if result is non-trivially good) ─────────────────
+    # Do NOT serve a cached all-None result — forces a real retry.
+    if (fen_str == _sf_cache_fen
+            and _sf_cache_result is not None
+            and any(v is not None for v in _sf_cache_result.values())):
+        log.info("[SF] cache hit — FEN: %s", fen_str[:50])
         return _sf_cache_result
 
-    log.info("[SF] analyze_position called (depth=%d) — FEN: %s", SF_DEPTH, fen_str[:40])
+    log.info("[SF] query (depth=%d) — FEN: %s", SF_DEPTH, fen_str[:50])
     result = {"best_move": None, "eval_cp": None, "eval_pawns": None}
+
     try:
         with _sf_lock:
-            # Reuse the persistent process — no spawn overhead.
+            # ── Process health check (catches silent crashes) ──────────────────
+            # Only run if the previous result was bad, to avoid overhead.
+            if _sf_cache_result is not None and not any(
+                    v is not None for v in _sf_cache_result.values()):
+                log.warning("[SF] previous result was all-None — running health check")
+                if not _sf_is_healthy():
+                    _sf_respawn()
+                    if not STOCKFISH_OK:
+                        return result   # respawn failed — give up
+
             _sf_instance.set_fen_position(fen_str)
+
+            # ── Primary: get_top_moves(1) gives move + eval in one call ────────
             top = _sf_instance.get_top_moves(1)
+            log.info("[SF] get_top_moves(1) returned: %s", top)
 
-        if top:
-            entry     = top[0]
-            best_uci  = entry.get("Move", "")
-            centipawn = entry.get("Centipawn")
-            mate      = entry.get("Mate")
-            side      = fen_str.split()[1] if ' ' in fen_str else 'w'
+            best_uci  = None
+            centipawn = None
+            mate      = None
 
-            if best_uci and len(best_uci) >= 4:
-                result["best_move"] = best_uci[:4]
+            if top:
+                entry     = top[0]
+                best_uci  = entry.get("Move", "")
+                centipawn = entry.get("Centipawn")
+                mate      = entry.get("Mate")
+            else:
+                # ── Fallback: get_top_moves returned [] (forced move / near-mate)
+                # Use get_best_move() which always returns UCI even in these cases.
+                log.warning("[SF] get_top_moves returned [] — falling back to get_best_move()")
+                best_uci = _sf_instance.get_best_move()
+                log.warning("[SF] get_best_move fallback result: %s", best_uci)
+                # Eval unavailable in this path — leave centipawn/mate as None
 
+            # ── Parse eval ────────────────────────────────────────────────────
+            side = fen_str.split()[1] if ' ' in fen_str else 'w'
             if mate is not None:
                 sign = 1 if mate > 0 else -1
                 if side == 'b':
@@ -296,42 +388,52 @@ def analyze_position(fen_str):
             else:
                 cp = None
 
+            if best_uci and len(best_uci) >= 4:
+                result["best_move"] = best_uci[:4]
             result["eval_cp"]    = cp
             result["eval_pawns"] = round(cp / 100.0, 2) if cp is not None else None
 
     except Exception as ex:
-        log.error("[analyze_position error] %s", ex)
+        log.error("[SF] analyze_position EXCEPTION: %s", ex, exc_info=True)
+        # Don't cache exception results — let next call retry
+        return result
 
-    # ── Cache store ────────────────────────────────────────────────────────────
-    _sf_cache_fen    = fen_str
-    _sf_cache_result = result
+    # ── Only cache if we got something useful ─────────────────────────────────
+    if any(v is not None for v in result.values()):
+        _sf_cache_fen    = fen_str
+        _sf_cache_result = result
+    else:
+        log.warning("[SF] all-None result for FEN: %s — NOT caching", fen_str[:50])
+
     return result
 
 
-# ── Thin compatibility wrappers (keep call-sites unchanged) ────────────────────
+# ── Thin compatibility wrappers (call-sites unchanged) ─────────────────────────
 
 def _sf_eval_at_fen(fen_str):
-    """White-positive centipawn eval at a given FEN. Uses analyze_position cache."""
-    return analyze_position(fen_str)["eval_cp"]
+    """White-positive centipawn eval. Falls back to 0 (not None) if SF unavailable."""
+    cp = analyze_position(fen_str)["eval_cp"]
+    return cp  # callers handle None gracefully
 
 
 def _sf_eval():
-    """Return Stockfish eval for current global board position."""
+    """Return Stockfish eval (centipawns, white-positive) for current board."""
     return _sf_eval_at_fen(_fen())
 
 
 def _sf_best_move_and_eval(fen_str):
     """
-    Returns (best_move_uci, eval_cp_white_positive).
-    Both values come from a single analyze_position() call — no extra SF spawn.
+    Returns (best_move_uci, eval_cp).
+    Single analyze_position() call — cache means second callers are free.
     """
     r = analyze_position(fen_str)
     return r["best_move"], r["eval_cp"]
 
 
 def _sf_best_move_from_fen(fen_str):
-    """Best move UCI string for a given FEN. Uses analyze_position cache."""
+    """Best move UCI for a given FEN. Uses analyze_position cache."""
     return analyze_position(fen_str)["best_move"]
+
 
 def _classify_move(eval_before, best_eval, eval_after, moving_color, sacrificed_material=0):
     """
