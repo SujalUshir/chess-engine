@@ -205,8 +205,30 @@ const Board = (() => {
           if(board[r][c]===k){ window._chkSq=i2n(r,c); break outer; }
     }
 
-    _drawBar($eFill,$eVal,data.eval_engine??null);
-    _drawBar($sFill,$sVal,data.eval_sf??null);
+  /* ════════════════════════════════════════════
+     EVAL BARS  — smoothed to prevent flicker
+  ════════════════════════════════════════════ */
+  let _prevEngineCp = null;  // smoothing state
+  let _prevSfCp     = null;
+
+  function _smoothEval(prev, next) {
+    if (next === null || next === undefined) return next;
+    if (prev === null || prev === undefined) return next;
+    // 70% previous + 30% new — damps single-move depth spikes
+    return 0.7 * prev + 0.3 * next;
+  }
+
+  function _applyBars(data) {
+    const rawE = data.eval_engine ?? null;
+    const rawS = data.eval_sf     ?? null;
+    const smoothE = _smoothEval(_prevEngineCp, rawE);
+    const smoothS = _smoothEval(_prevSfCp,     rawS);
+    if (rawE !== null) _prevEngineCp = smoothE;
+    if (rawS !== null) _prevSfCp     = smoothS;
+    _drawBar($eFill, $eVal, smoothE);
+    _drawBar($sFill, $sVal, smoothS);
+  }
+
     _updateUndoRedo(data.can_undo,data.can_redo);
     render();
     _updateDots();
@@ -430,8 +452,8 @@ const Board = (() => {
   async function _refreshEval(){
     try{
       const data=await GET('/eval');
-      _drawBar($eFill,$eVal,data.eval_engine??null);
-      _drawBar($sFill,$sVal,data.eval_sf??null);
+      _applyBars(data);
+
     }catch(e){}
   }
 
@@ -779,9 +801,15 @@ const Board = (() => {
       }
       const b=rev.best_eval_cp, a=rev.eval_after_cp;
       if(b!=null && a!=null){
-        const sign=(rev.moving_color==='white')?1:-1;
-        const delta=Math.max(0, sign*(b-a));
-        scores.push(Math.max(0, 100 - delta/3));
+        // b and a are both WHITE-positive centipawns.
+        // cp_loss from mover's perspective:
+        //   White wants high eval  → loss = b - a (best possible minus what happened)
+        //   Black wants low eval   → loss = a - b (what happened minus best possible)
+        const cp_loss = rev.moving_color==='white'
+          ? Math.max(0, b - a)
+          : Math.max(0, a - b);
+        // Exponential accuracy: perfect move = 100%, mirrors server-side formula.
+        scores.push(Math.max(0, 100 * Math.exp(-cp_loss / 300)));
       }
     }
     const accuracy = scores.length

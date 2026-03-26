@@ -2,8 +2,7 @@
 Chess Engine — Flask Backend
 python app.py
 """
-import os
-import copy, traceback, os, json, datetime, threading
+import copy, traceback, os, json, datetime, threading, math
 from flask import Flask, jsonify, request, render_template, send_from_directory
 import engine
 import logging
@@ -506,32 +505,27 @@ def _classify_move(eval_before, best_eval, eval_after, moving_color, sacrificed_
     if best_eval is None or eval_after is None:
         return None
 
-    # Convert to moving-player-positive perspective
+    # Both best_eval and eval_after are white-positive centipawns.
+    # cp_loss = how many centipawns worse the played move is vs the best move,
+    # expressed from the moving-player's perspective (always >= 0 when clamped).
     if moving_color == 'white':
-        played_val = eval_after
-        best_val   = best_eval
+        # White wants eval to be HIGH; loss = best possible - what happened
+        cp_loss = best_eval - eval_after
     else:
-        played_val = -eval_after
-        best_val   = -best_eval
+        # Black wants eval to be LOW (white-positive); loss = what happened - best possible
+        cp_loss = eval_after - best_eval
 
-    # delta: how much worse the played move is vs the best move
-    # delta <= 0 means the played move was AT LEAST as good as Stockfish's best
-    delta = best_val - played_val
+    delta = max(0, cp_loss)   # clamp — negative means played >= best (no loss)
 
     # ── Brilliant: sacrificed own material AND very close to best move ──
     if sacrificed_material > 0 and delta <= 30:
         return "Brilliant"
 
-    if delta <= 20:
-        return "Best"
-    if delta <= 50:
-        return "Excellent"
-    if delta <= 100:
-        return "Good"
-    if delta <= 200:
-        return "Inaccuracy"
-    if delta <= 400:
-        return "Mistake"
+    if delta <= 20:   return "Best"
+    if delta <= 50:   return "Excellent"
+    if delta <= 100:  return "Good"
+    if delta <= 300:  return "Inaccuracy"
+    if delta <= 700:  return "Mistake"
     return "Blunder"
 
 def _is_book_move(move_number, eval_before):
@@ -1173,9 +1167,17 @@ def _compute_side_stats(moves):
         a     = e.get("eval_after_cp")
         color = e.get("moving_color", "white")
         if b is not None and a is not None:
-            sign  = 1 if color == "white" else -1
-            delta = max(0, sign * (b - a))
-            scores.append(max(0.0, 100.0 - delta / 3.0))
+            # b and a are both white-positive centipawns.
+            # cp_loss from mover's perspective:
+            #   White wants high eval → loss = b - a (positive when played < best)
+            #   Black wants low eval  → loss = a - b (positive when played > best)
+            if color == "white":
+                cp_loss = max(0, b - a)
+            else:
+                cp_loss = max(0, a - b)
+            # Exponential accuracy: 100% for perfect moves, decays with cp_loss.
+            # 300cp loss ≈ 37%, 700cp loss ≈ 10%, matching real accuracy tools.
+            scores.append(max(0.0, 100.0 * math.exp(-cp_loss / 300.0)))
 
     accuracy = round(sum(scores) / len(scores)) if scores else 100
     return {
