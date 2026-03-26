@@ -469,6 +469,51 @@ def _sf_eval():
     return _sf_eval_at_fen(_fen())
 
 
+def _sf_eval_white_pov(fen_str):
+    """
+    Single-source-of-truth eval function (spec Part 1).
+    Calls Stockfish at the SAME fixed depth (SF_DEPTH) for every invocation,
+    then converts to white-positive centipawns.
+
+    Mate scores use: ±(10000 - abs(mate_in_n) * 10)
+      mate +3  →  +9970   (white mates in 3)
+      mate -2  →  -9980   (black mates in 2)
+
+    Returns None if SF is unavailable or FEN is invalid.
+    """
+    if not STOCKFISH_OK or _sf_instance is None:
+        return None
+    if not _sf_validate_fen(fen_str):
+        return None
+    side = fen_str.split()[1] if ' ' in fen_str else 'w'
+    try:
+        with _sf_lock:
+            _sf_instance.set_depth(SF_DEPTH)         # enforce consistent depth
+            _sf_instance.set_fen_position(fen_str)
+            ev = _sf_instance.get_evaluation()        # {"type": "cp"|"mate", "value": int}
+        if not ev:
+            return None
+        etype = ev.get("type")
+        val   = ev.get("value")
+        if val is None:
+            return None
+        if etype == "mate":
+            # mate +n = side-to-move mates in n → big positive from side-to-move
+            sign = 1 if val > 0 else -1
+            cp   = sign * (10000 - abs(val) * 10)
+        elif etype == "cp":
+            cp = val
+        else:
+            return None
+        # Convert from side-to-move perspective to white-positive
+        if side == 'b':
+            cp = -cp
+        return cp
+    except Exception as ex:
+        log.warning("[_sf_eval_white_pov] failed for FEN %s: %s", fen_str[:40], ex)
+        return None
+
+
 def _sf_best_move_and_eval(fen_str):
     """
     Returns (best_move_uci, eval_cp).
@@ -623,36 +668,35 @@ def _build_move_review_entry(pre_snap, played_uci, move_number):
         fen_before   = _fen()
         moving_color = engine.current_turn
 
-        # ── Single SF call for the pre-move position ──────────────────────────
-        pre_analysis = analyze_position(fen_before)   # cached from here on
-        eval_before  = pre_analysis["eval_cp"]
+        # ── Step 1: eval_before at consistent depth ────────────────────────────
+        eval_before = _sf_eval_white_pov(fen_before)
+
+        # ── Step 2: get best move from original FEN (uses analyze_position cache) ─
+        pre_analysis = analyze_position(fen_before)
         best_uci     = pre_analysis["best_move"]
 
-        # ── Compute best_eval: SF eval AFTER playing the best move ────────────
-        # We apply best_uci to a temporary board state, compute fen_best,
-        # then ask SF for its evaluation of that position.  This is the only
-        # correct reference point for delta = best_val - played_val.
-        # (Previously best_eval was accidentally set to eval_before, making
-        # delta ≈ 0 for every move and classifying everything as "Best".)
+        # ── Step 3: eval_best — independent board from original FEN ───────────
+        # Apply best_uci on a TEMP snap, generate fen_best, eval at same depth.
+        # NEVER re-use the same board object that we'll use for eval_after.
         best_eval = None
         if best_uci and len(best_uci) >= 4:
-            _best_snap = _snap()
+            _best_snap = _snap()   # board == pre_snap at this point
             try:
                 engine.move_piece_notation(
                     engine.board, best_uci[:2], best_uci[2:4]
                 )
                 fen_best  = _fen()
-                best_eval = analyze_position(fen_best)["eval_cp"]
+                best_eval = _sf_eval_white_pov(fen_best)
             except Exception as _bex:
-                log.warning("[build_review] best_eval computation failed: %s — falling back to eval_before", _bex)
-                best_eval = eval_before   # graceful fallback
+                log.warning("[build_review] fen_best eval failed: %s", _bex)
             finally:
-                _restore(_best_snap)
-        else:
-            # No best move (terminal position) — fall back to pre-move eval
-            best_eval = eval_before
+                _restore(_best_snap)   # board back to pre_snap
 
-        # ── Material tracking for Brilliant detection ──────────────────────────
+        if best_eval is None:
+            best_eval = eval_before   # terminal or SF error — graceful fallback
+
+        # ── Step 4: eval_after — another independent board from original FEN ───
+        # Board is currently at pre_snap (restored above); apply played_uci.
         own_material_before = _material_score(engine.board, moving_color)
 
         temp_board = copy.deepcopy(engine.board)
@@ -661,15 +705,15 @@ def _build_move_review_entry(pre_snap, played_uci, move_number):
         _p = temp_board[temp_fr][temp_fc]
         temp_board[temp_tr][temp_tc] = _p
         temp_board[temp_fr][temp_fc] = "."
-
         own_material_after  = _material_score(temp_board, moving_color)
         sacrificed_material = max(0, own_material_before - own_material_after)
 
-        # ── Apply move, get fen_after, single SF call for post-move position ──
         engine.move_piece_notation(engine.board, played_uci[:2], played_uci[2:4])
-        fen_after    = _fen()
-        post_analysis = analyze_position(fen_after)   # cached — _payload reuses this
-        eval_after    = post_analysis["eval_cp"]
+        fen_after  = _fen()
+        eval_after = _sf_eval_white_pov(fen_after)
+
+        if eval_after is None:
+            eval_after = eval_before   # SF error — fallback
 
         classification = _classify_move(
             eval_before, best_eval, eval_after,
