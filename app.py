@@ -679,6 +679,24 @@ def _build_move_review_entry(pre_snap, played_uci, move_number):
         if classification not in ("Brilliant", "Best") and _is_book_move(move_number, eval_before):
             classification = "Book"
 
+        # ── Mandatory debug output (Part 7) ───────────────────────────────────
+        if moving_color == "white":
+            cp_loss_debug = max(0, (best_eval or 0) - (eval_after or 0))
+        else:
+            cp_loss_debug = max(0, (eval_after or 0) - (best_eval or 0))
+
+        print(f"[review] move={played_uci}  mover={moving_color}")
+        print(f"  eval_before={eval_before}  eval_best={best_eval}  eval_after={eval_after}")
+        print(f"  cp_loss={cp_loss_debug}  classification={classification}")
+
+        # ── Assertions to surface degenerate pipeline states ──────────────────
+        if best_eval is not None and eval_before is not None:
+            if best_eval == eval_before:
+                print(f"  [ERROR] eval_best == eval_before ({best_eval}) — best move fallback triggered or SF returned identical eval")
+        if eval_after is not None and best_eval is not None:
+            if abs(cp_loss_debug) < 1 and played_uci != best_uci:
+                print(f"  [WARN] cp_loss ~0 but played ({played_uci}) != best ({best_uci}) — check SF cache or eval pipeline")
+
         return {
             "move_number":         move_number,
             "played":              played_uci,

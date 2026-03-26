@@ -163,6 +163,31 @@ const Board = (() => {
   /* drag */
   let dragActive=false, dragFrom=null, dragEl=null, _dox=0, _doy=0;
 
+  /* ════════════════════════════════════════════
+     EVAL BAR SMOOTHING — module scope so state
+     persists across applyState / _refreshEval calls
+  ════════════════════════════════════════════ */
+  let _prevEngineCp = null;
+  let _prevSfCp     = null;
+
+  function _smoothEval(prev, next) {
+    if (next === null || next === undefined) return next;
+    if (prev === null || prev === undefined) return next;
+    // 80% previous + 20% new — damps single-move depth spikes without hiding sign bugs
+    return 0.8 * prev + 0.2 * next;
+  }
+
+  function _applyBars(data) {
+    const rawE = data.eval_engine ?? null;
+    const rawS = data.eval_sf     ?? null;
+    const smoothE = _smoothEval(_prevEngineCp, rawE);
+    const smoothS = _smoothEval(_prevSfCp,     rawS);
+    if (rawE !== null) _prevEngineCp = smoothE;
+    if (rawS !== null) _prevSfCp     = smoothS;
+    _drawBar($eFill, $eVal, smoothE !== null ? smoothE : rawE);
+    _drawBar($sFill, $sVal, smoothS !== null ? smoothS : rawS);
+  }
+
   /* DOM refs */
   let $board, $status, $eFill, $sFill, $eVal, $sVal,
       $capTop, $capBot,
@@ -205,34 +230,13 @@ const Board = (() => {
           if(board[r][c]===k){ window._chkSq=i2n(r,c); break outer; }
     }
 
-  /* ════════════════════════════════════════════
-     EVAL BARS  — smoothed to prevent flicker
-  ════════════════════════════════════════════ */
-  let _prevEngineCp = null;  // smoothing state
-  let _prevSfCp     = null;
-
-  function _smoothEval(prev, next) {
-    if (next === null || next === undefined) return next;
-    if (prev === null || prev === undefined) return next;
-    // 70% previous + 30% new — damps single-move depth spikes
-    return 0.7 * prev + 0.3 * next;
-  }
-
-  function _applyBars(data) {
-    const rawE = data.eval_engine ?? null;
-    const rawS = data.eval_sf     ?? null;
-    const smoothE = _smoothEval(_prevEngineCp, rawE);
-    const smoothS = _smoothEval(_prevSfCp,     rawS);
-    if (rawE !== null) _prevEngineCp = smoothE;
-    if (rawS !== null) _prevSfCp     = smoothS;
-    _drawBar($eFill, $eVal, smoothE);
-    _drawBar($sFill, $sVal, smoothS);
-  }
-
+    // Update eval bars using module-scoped _applyBars (keeps smoothing state)
+    _applyBars(data);
     _updateUndoRedo(data.can_undo,data.can_redo);
     render();
     _updateDots();
   }
+
 
   /* ════════════════════════════════════════════
      RENDER BOARD
