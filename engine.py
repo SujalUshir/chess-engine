@@ -21,6 +21,8 @@ pieces = ["P","N","B","R","Q","K","p","n","b","r","q","k"]
 zobrist_table = {}
 zobrist_turn = random.getrandbits(64)
 zobrist_enpassant = [random.getrandbits(64) for _ in range(8)]
+# Castling-rights Zobrist keys: [white_K, white_Q, black_k, black_q]
+zobrist_castling = [random.getrandbits(64) for _ in range(4)]
 
 for piece in pieces:
     zobrist_table[piece] = [random.getrandbits(64) for _ in range(64)]
@@ -98,22 +100,41 @@ def human_vs_engine(board):
 ########################################
 # UTILITY FUNCTIONS
 ########################################
-def hash_board(board,turn):
-    h=0
+def hash_board(board, turn):
+    """
+    Compute a Zobrist hash for the position key used in threefold-repetition
+    detection.  Includes: piece placement, side to move, castling rights,
+    en-passant file.  Does NOT include halfmove clock or fullmove number
+    (per FIDE rules).
+    """
+    h = 0
 
-    if turn=="white":
-        h^=zobrist_turn
+    # Side to move
+    if turn == "white":
+        h ^= zobrist_turn
+
+    # Piece placement
     for r in range(8):
         for c in range(8):
-            piece=board[r][c]
+            piece = board[r][c]
+            if piece != ".":
+                h ^= zobrist_table[piece][r * 8 + c]
 
-            if piece!=".":
-                square=r*8+c
-                h^=zobrist_table[piece][square]
+    # Castling rights  (white-K, white-Q, black-k, black-q)
+    if not white_king_moved and not white_rook_h_moved:
+        h ^= zobrist_castling[0]
+    if not white_king_moved and not white_rook_a_moved:
+        h ^= zobrist_castling[1]
+    if not black_king_moved and not black_rook_h_moved:
+        h ^= zobrist_castling[2]
+    if not black_king_moved and not black_rook_a_moved:
+        h ^= zobrist_castling[3]
 
+    # En-passant file (only the file matters per FIDE)
     if en_passant_target:
-        row,col=en_passant_target
+        _, col = en_passant_target
         h ^= zobrist_enpassant[col]
+
     return h
 
 def copy_board(board):
@@ -736,10 +757,18 @@ def move_piece_notation(board,from_square,to_square):
         
             
 
-    current_turn="black" if current_turn=="white" else "white"
-    hash_key = hash_board(board,current_turn)
-    position_history[hash_key] = position_history.get(hash_key,0) + 1
-    if position_history[hash_key] >= 3:
+    # Flip turn FIRST so the hash reflects the side that is NOW to move
+    # (matching the FIDE position-identity definition and the seed in _reset_globals).
+    current_turn = "black" if current_turn == "white" else "white"
+
+    # Record the resulting position in the game history.
+    # hash_board() includes piece placement + side-to-move + castling rights + ep file.
+    hash_key = hash_board(board, current_turn)
+    position_history[hash_key] = position_history.get(hash_key, 0) + 1
+    count = position_history[hash_key]
+    print(f"[rep] key={hash_key:#018x}  count={count}  turn={current_turn}")
+
+    if count >= 3:
         print_board(board)
         print("Draw by threefold repetition!")
         return
