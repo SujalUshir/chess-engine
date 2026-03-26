@@ -757,32 +757,27 @@ def move_piece_notation(board,from_square,to_square):
         
             
 
-    # Flip turn FIRST so the hash reflects the side that is NOW to move
-    # (matching the FIDE position-identity definition and the seed in _reset_globals).
+    # Flip turn. This is the ONLY global side-effect besides board/castling state.
+    # NOTE: position_history is intentionally NOT updated here.
+    #   move_piece_notation() is called in temp/analysis contexts too
+    #   (_build_move_review_entry, etc.).  Updating position_history here would
+    #   increment it once per CALL (not once per real game move), causing false
+    #   threefold-repetition triggers.  Repetition tracking is handled exclusively
+    #   by app.py route handlers after each confirmed real game move.
     current_turn = "black" if current_turn == "white" else "white"
 
-    # Record the resulting position in the game history.
-    # hash_board() includes piece placement + side-to-move + castling rights + ep file.
-    hash_key = hash_board(board, current_turn)
-    position_history[hash_key] = position_history.get(hash_key, 0) + 1
-    count = position_history[hash_key]
-    print(f"[rep] key={hash_key:#018x}  count={count}  turn={current_turn}")
-
-    if count >= 3:
-        print_board(board)
-        print("Draw by threefold repetition!")
-        return
-    if is_checkmate(board,current_turn):
+    # Terminal-mode game-over prints (only relevant when running engine.py directly).
+    if is_checkmate(board, current_turn):
         print(f"Checkmate! {'white' if current_turn=='black' else 'black'} wins!")
         return
     elif halfmove_clock >= 100:
         print_board(board)
         print("Draw by 50-move rule!")
         return
-    elif is_stalemate(board,current_turn):
+    elif is_stalemate(board, current_turn):
         print("Stalemate! Draw.")
         return
-    elif is_king_in_check(board,current_turn):
+    elif is_king_in_check(board, current_turn):
         print(f"{current_turn} king is in check!")
     print_board(board)
     print("--------------------------------")

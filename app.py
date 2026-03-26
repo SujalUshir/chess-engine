@@ -138,6 +138,8 @@ def _snap():
         "white_rook_h_moved": engine.white_rook_h_moved,
         "black_rook_a_moved": engine.black_rook_a_moved,
         "black_rook_h_moved": engine.black_rook_h_moved,
+        # position_history is included so undo/redo correctly reverts repetition counts.
+        "position_history":   dict(engine.position_history),
     }
 
 def _restore(s):
@@ -151,10 +153,36 @@ def _restore(s):
     engine.white_rook_h_moved  = s["white_rook_h_moved"]
     engine.black_rook_a_moved  = s["black_rook_a_moved"]
     engine.black_rook_h_moved  = s["black_rook_h_moved"]
+    # Restore repetition history so undo/redo reverts draw-detection state.
+    if "position_history" in s:
+        engine.position_history.clear()
+        engine.position_history.update(s["position_history"])
+
 
 def _snap_full():
     """Snapshot both board state and move history for full undo/redo."""
     return (_snap(), copy.deepcopy(_move_history))
+
+
+def _record_real_move_position(move_uci):
+    """
+    Record the current board position in position_history after a REAL game move.
+    Called ONLY from the three move route handlers (human/engine/stockfish),
+    NEVER from analysis helpers, temp-board computations, or undo/redo.
+
+    position_history maps Zobrist hash → occurrence count.
+    Threefold repetition triggers when any count reaches 3.
+    """
+    key   = engine.hash_board(engine.board, engine.current_turn)
+    count = engine.position_history.get(key, 0) + 1
+    engine.position_history[key] = count
+    print(f"REAL MOVE: {move_uci}")
+    print(f"HASH: {key:#018x}")
+    print(f"COUNT: {count}")
+    if count >= 2:
+        # Warn on repeated positions so duplicate-insertion bugs surface quickly.
+        print(f"[rep] position seen {count}x — {'DRAW SOON' if count == 2 else 'DRAW NOW'}")
+
 
 def _restore_full(entry):
     """Restore board state and move history from a full snapshot."""
@@ -882,6 +910,8 @@ def human_move():
     _undo_stack.append(_snap_full())
     _redo_stack.clear()
     engine.move_piece_notation(engine.board, fr, to)
+    # Record position ONCE for this real game move (not during analysis/review).
+    _record_real_move_position(played_uci)
 
     # Increment fullmove counter after Black's move
     # (turn has already flipped; "white" now means Black just moved)
@@ -939,8 +969,9 @@ def engine_move():
     _undo_stack.append(_snap_full())
     _redo_stack.clear()
     engine.move_piece_notation(engine.board, fr, to)
+    # Record position ONCE for this real game move (not during analysis/review).
+    _record_real_move_position(played_uci)
 
-    # Increment fullmove counter after Black's move
     if engine.current_turn == "white":
         _fullmove_counter += 1
 
@@ -1023,6 +1054,8 @@ def sf_move():
             promo = uci[4].upper()
             # `moving_color` captured before the turn flipped; White promotes to uppercase.
             engine.board[r2][c2] = promo if moving_color == "white" else promo.lower()
+        # Record position ONCE for this real game move (not during analysis/review).
+        _record_real_move_position(played_uci)
 
         # Increment fullmove counter after Black's move
         if engine.current_turn == "white":
