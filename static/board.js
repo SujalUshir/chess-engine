@@ -781,7 +781,7 @@ const Board = (() => {
       if(b!=null && a!=null){
         const sign=(rev.moving_color==='white')?1:-1;
         const delta=Math.max(0, sign*(b-a));
-        scores.push(Math.max(0, 100 - delta/10));
+        scores.push(Math.max(0, 100 - delta/3));
       }
     }
     const accuracy = scores.length

@@ -605,10 +605,30 @@ def _build_move_review_entry(pre_snap, played_uci, move_number):
         pre_analysis = analyze_position(fen_before)   # cached from here on
         eval_before  = pre_analysis["eval_cp"]
         best_uci     = pre_analysis["best_move"]
-        best_eval    = pre_analysis["eval_cp"]  # eval AT fen_before = eval of best move
-        # NOTE: best_eval here is the eval at the position where the best move
-        # was chosen (before the move), which is what _classify_move expects
-        # (it diffs eval_after vs best_eval both in white-positive cp terms).
+
+        # ── Compute best_eval: SF eval AFTER playing the best move ────────────
+        # We apply best_uci to a temporary board state, compute fen_best,
+        # then ask SF for its evaluation of that position.  This is the only
+        # correct reference point for delta = best_val - played_val.
+        # (Previously best_eval was accidentally set to eval_before, making
+        # delta ≈ 0 for every move and classifying everything as "Best".)
+        best_eval = None
+        if best_uci and len(best_uci) >= 4:
+            _best_snap = _snap()
+            try:
+                engine.move_piece_notation(
+                    engine.board, best_uci[:2], best_uci[2:4]
+                )
+                fen_best  = _fen()
+                best_eval = analyze_position(fen_best)["eval_cp"]
+            except Exception as _bex:
+                log.warning("[build_review] best_eval computation failed: %s — falling back to eval_before", _bex)
+                best_eval = eval_before   # graceful fallback
+            finally:
+                _restore(_best_snap)
+        else:
+            # No best move (terminal position) — fall back to pre-move eval
+            best_eval = eval_before
 
         # ── Material tracking for Brilliant detection ──────────────────────────
         own_material_before = _material_score(engine.board, moving_color)
@@ -1122,7 +1142,7 @@ def _compute_side_stats(moves):
         if b is not None and a is not None:
             sign  = 1 if color == "white" else -1
             delta = max(0, sign * (b - a))
-            scores.append(max(0.0, 100.0 - delta / 10.0))
+            scores.append(max(0.0, 100.0 - delta / 3.0))
 
     accuracy = round(sum(scores) / len(scores)) if scores else 100
     return {
